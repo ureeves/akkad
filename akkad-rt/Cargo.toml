@@ -1,0 +1,10 @@
+[package]
+name = "kadrs-rt"
+version = "0.1.0"
+authors = ["Eduardo Leegwater Simões <eduardols@protonmail.com>"]
+edition = "2018"
+
+[dependencies]
+
+[dev-dependencies]
+rand = "0.7.3"
