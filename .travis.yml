@@ -1,0 +1,9 @@
+language: rust
+rust:
+    - nightly
+    # litmus test for when const_generics stabilizes
+    # - stable
+    # - beta
+# matrix:
+#     allow_failures:
+#         - rust: nightly
