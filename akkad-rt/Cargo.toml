@@ -1,5 +1,5 @@
 [package]
-name = "kadrs-rt"
+name = "akkad-rt"
 version = "0.1.0"
 authors = ["Eduardo Leegwater Simões <eduardols@protonmail.com>"]
 edition = "2018"

@@ -1,10 +1,31 @@
-//! Routing table for a Kademlia decentralized hash table
+//! Routing table for a Kademlia decentralized hash table.
 //!
-//! The table is generic over certain parameters - including key size - which
-//! unfortunately means using the
-//! [`const_generics`](https://github.com/rust-lang/rust/issues/44580) feature.
-//! This means this only works on Rust nightly until the feature has been
-//! stabilized.
+//! This crate only compiles on nightly due to the use of feature flags. When
+//! [`const_generics`](https://github.com/rust-lang/rust/issues/44580) is
+//! stabilized this will change.
+//!
+//! # Example
+//!
+//! ```
+//! use akkad_rt::RoutingTable;
+//!
+//! let host_key = [0u8; 1];
+//! let mut rt = RoutingTable::new(host_key.clone(), ());
+//!
+//! let key = [1u8; 1];
+//! rt.update(key, ());
+//!
+//! let key = [2u8; 1];
+//! rt.update(key, ());
+//!
+//! let mut closest = rt.closest(&host_key);
+//!
+//! let elem1 = closest.next().unwrap();
+//! let elem2 = closest.next().unwrap();
+//!
+//! assert_eq!(elem1.0[0], 1);
+//! assert_eq!(elem2.0[0], 2);
+//! ```
 #![allow(incomplete_features)]
 #![feature(const_generics)]
 #![deny(missing_docs)]
@@ -16,48 +37,61 @@ use core::mem::{self, MaybeUninit};
 const K_PARAM: usize = 20;
 
 /// A Kademlia routing table for storing information about keys.
-///
-/// # Example
-///
-/// ```
-/// use kadrs_rt::RoutingTable;
-///
-/// let host_key = [0u8; 1];
-/// let mut rt = RoutingTable::new(host_key.clone(), ());
-///
-/// let key = [1u8; 1];
-/// rt.update(key, ());
-///
-/// let key = [2u8; 1];
-/// rt.update(key, ());
-///
-/// let mut closest = rt.closest(&host_key);
-///
-/// let elem1 = closest.next().unwrap();
-/// let elem2 = closest.next().unwrap();
-///
-/// assert_eq!(elem1.0[0], 1);
-/// assert_eq!(elem2.0[0], 2);
-/// ```
 pub struct RoutingTable<I, const N: usize>(ExpandedRoutingTable<I, { N }, { N * 8 }>);
 
 impl<I, const N: usize> RoutingTable<I, N> {
     /// Creates a new empty routing table with key and info belonging to the
     /// local node.
+    ///
+    /// # Example
+    /// ```
+    /// use akkad_rt::RoutingTable;
+    ///
+    /// let host_key = [0u8; 1];
+    /// let mut rt = RoutingTable::new(host_key, ());
+    /// ```
     pub fn new(key: [u8; N], info: I) -> Self {
         Self(ExpandedRoutingTable::new(key, info))
     }
 
-    /// Update the routing table with key and related info.
+    /// Update the routing table with key and info.
     ///
-    /// If the table was full for the particular neighborhood of the key, the
+    /// If the table is full for the particular neighborhood of the key, the
     /// oldest info on the table is returned.
+    ///
+    /// # Example
+    /// ```
+    /// use akkad_rt::RoutingTable;
+    ///
+    /// let host_key = [0u8; 1];
+    /// let mut rt = RoutingTable::new(host_key, ());
+    ///
+    /// let key = [1u8; 1];
+    /// rt.update(key, ());
+    /// ```
     pub fn update(&mut self, key: [u8; N], info: I) -> Option<([u8; N], I)> {
         self.0.update(key, info)
     }
 
     /// Returns an iterator through the table - ordered by closest to the key
     /// first.
+    ///
+    /// # Example
+    /// ```
+    /// use akkad_rt::RoutingTable;
+    ///
+    /// let host_key = [0u8; 1];
+    /// let mut rt = RoutingTable::new(host_key.clone(), ());
+    ///
+    /// let key1 = [1u8; 1];
+    /// let key2 = [2u8; 1];
+    /// rt.update(key1, ());
+    /// rt.update(key2, ());
+    ///
+    /// for elem in rt.closest(&host_key) {
+    ///     // do something with the elements
+    /// }
+    /// ```
     pub fn closest(&self, key: &[u8; N]) -> impl Iterator<Item = (&[u8; N], &I)> {
         self.0.closest(key)
     }
