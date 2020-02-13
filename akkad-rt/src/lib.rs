@@ -92,40 +92,37 @@ impl<I, const N: usize> RoutingTable<I, N> {
     ///     // do something with the elements
     /// }
     /// ```
-    pub fn closest(&self, key: &[u8; N]) -> impl Iterator<Item = (&[u8; N], &I)> {
+    pub fn closest(&self, key: &[u8; N]) -> impl Iterator<Item = &([u8; N], I)> {
         self.0.closest(key)
     }
 }
 
 struct ExpandedRoutingTable<I, const N: usize, const N8: usize> {
-    key: Key<N>,
+    key: [u8; N],
     _info: I,
-    table: [KBucket<I, K_PARAM, N>; N8],
+    table: [KBucket<I, K_PARAM, N, N8>; N8],
 }
 
 impl<I, const N: usize, const N8: usize> ExpandedRoutingTable<I, N, N8> {
     fn new(key: [u8; N], _info: I) -> Self {
-        let mut data: [MaybeUninit<KBucket<I, K_PARAM, N>>; N8] =
+        let mut data: [MaybeUninit<KBucket<I, K_PARAM, N, N8>>; N8] =
             unsafe { MaybeUninit::uninit().assume_init() };
 
         for i in 0..N8 {
             data[i] = MaybeUninit::new(KBucket::default());
         }
 
-        let key = key.into();
-        let table = unsafe { (&data as *const _ as *const [KBucket<I, K_PARAM, N>; N8]).read() };
+        let table =
+            unsafe { (&data as *const _ as *const [KBucket<I, K_PARAM, N, N8>; N8]).read() };
         Self { key, _info, table }
     }
 
     fn update(&mut self, key: [u8; N], info: I) -> Option<([u8; N], I)> {
-        let key = key.into();
-        let index = self.key.index(&key);
-        self.table[index]
-            .update(key.into(), info)
-            .map(|(key, info)| (key.0, info))
+        let index = Key::<N, N8>::index(&self.key, &key);
+        self.table[index].update(key, info)
     }
 
-    pub fn closest(&self, key: &[u8; N]) -> impl Iterator<Item = (&[u8; N], &I)> {
+    pub fn closest(&self, key: &[u8; N]) -> impl Iterator<Item = &([u8; N], I)> {
         ClosestIterator::<I, N, N8, { K_PARAM * N8 }>::new(key, self)
     }
 }
@@ -133,7 +130,7 @@ impl<I, const N: usize, const N8: usize> ExpandedRoutingTable<I, N, N8> {
 struct ClosestIterator<'a, I, const N: usize, const N8: usize, const KN8: usize> {
     index: usize,
     len: usize,
-    arr: [(&'a [u8; N], &'a I); KN8],
+    arr: [&'a ([u8; N], I); KN8],
 }
 
 impl<'a, 'b, I, const N: usize, const N8: usize, const KN8: usize>
@@ -143,23 +140,19 @@ impl<'a, 'b, I, const N: usize, const N8: usize, const KN8: usize>
         let mut len = 0;
 
         let arr = {
-            let mut arr: [MaybeUninit<(&[u8; N], &I)>; KN8] =
+            let mut arr: [MaybeUninit<&([u8; N], I)>; KN8] =
                 unsafe { MaybeUninit::uninit().assume_init() };
 
             for i in 0..N8 {
                 let filled = ert.table[i].filled;
                 for j in 0..filled {
                     let elem = unsafe { &*ert.table[i].arr[j].as_ptr() };
-
-                    let key_ref = &(elem.0).0;
-                    let info_ref = &elem.1;
-
-                    arr[len + j] = MaybeUninit::new((key_ref, info_ref));
+                    arr[len + j] = MaybeUninit::new(elem);
                 }
                 len += filled;
             }
 
-            let mut arr = unsafe { (&arr as *const _ as *const [(&[u8; N], &I); KN8]).read() };
+            let mut arr = unsafe { (&arr as *const _ as *const [&([u8; N], I); KN8]).read() };
 
             arr[0..len].sort_by(|lhs, rhs| {
                 let lhs_key = lhs.0;
@@ -191,7 +184,7 @@ impl<'a, 'b, I, const N: usize, const N8: usize, const KN8: usize>
 impl<'a, I, const N: usize, const N8: usize, const KN8: usize> Iterator
     for ClosestIterator<'a, I, N, N8, KN8>
 {
-    type Item = (&'a [u8; N], &'a I);
+    type Item = &'a ([u8; N], I);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index == self.len {
@@ -206,12 +199,14 @@ impl<'a, I, const N: usize, const N8: usize, const KN8: usize> Iterator
 }
 
 /// A fixed-sized array-backed FIFO queue with insertion capabilities.
-struct KBucket<I, const K_PARAM: usize, const N: usize> {
-    arr: [MaybeUninit<(Key<N>, I)>; K_PARAM],
+struct KBucket<I, const K_PARAM: usize, const N: usize, const N8: usize> {
+    arr: [MaybeUninit<([u8; N], I)>; K_PARAM],
     filled: usize,
 }
 
-impl<I, const K_PARAM: usize, const N: usize> Default for KBucket<I, K_PARAM, N> {
+impl<I, const K_PARAM: usize, const N: usize, const N8: usize> Default
+    for KBucket<I, K_PARAM, N, N8>
+{
     fn default() -> Self {
         Self {
             arr: unsafe { MaybeUninit::uninit().assume_init() },
@@ -220,8 +215,8 @@ impl<I, const K_PARAM: usize, const N: usize> Default for KBucket<I, K_PARAM, N>
     }
 }
 
-impl<I, const K_PARAM: usize, const N: usize> KBucket<I, K_PARAM, N> {
-    fn update(&mut self, key: Key<N>, info: I) -> Option<(Key<N>, I)> {
+impl<I, const K_PARAM: usize, const N: usize, const N8: usize> KBucket<I, K_PARAM, N, N8> {
+    fn update(&mut self, key: [u8; N], info: I) -> Option<([u8; N], I)> {
         if let Some(index) = self.index(&key) {
             let info = self.replace_with_until(index, key, info);
             unsafe { info.assume_init() };
@@ -243,9 +238,9 @@ impl<I, const K_PARAM: usize, const N: usize> KBucket<I, K_PARAM, N> {
     fn replace_with_until(
         &mut self,
         index: usize,
-        key: Key<N>,
+        key: [u8; N],
         info: I,
-    ) -> MaybeUninit<(Key<N>, I)> {
+    ) -> MaybeUninit<([u8; N], I)> {
         let mut info = MaybeUninit::new((key, info));
         for i in 0..=index {
             info = mem::replace(&mut self.arr[i], info);
@@ -254,10 +249,10 @@ impl<I, const K_PARAM: usize, const N: usize> KBucket<I, K_PARAM, N> {
     }
 
     /// `Some(index)` if a node with the same key is in the bucket, `None` if not.
-    fn index(&self, key: &Key<N>) -> Option<usize> {
+    fn index(&self, key: &[u8; N]) -> Option<usize> {
         for i in 0..self.filled {
             let self_key = &unsafe { &*self.arr[i].as_ptr() }.0;
-            if self_key == key {
+            if Key::<N, N8>::eq(self_key, key) {
                 return Some(i);
             }
         }
@@ -265,13 +260,13 @@ impl<I, const K_PARAM: usize, const N: usize> KBucket<I, K_PARAM, N> {
     }
 }
 
-struct Key<const N: usize>([u8; N]);
+struct Key<const N: usize, const N8: usize>;
 
-impl<const N: usize> Key<N> {
-    fn index(&self, other: &Self) -> usize {
+impl<const N: usize, const N8: usize> Key<N, N8> {
+    fn index(key: &[u8; N], other: &[u8; N]) -> usize {
         let mut zeros = 0;
         for i in 0..N {
-            let inc = (self.0[i] ^ other.0[i]).leading_zeros() as usize;
+            let inc = (key[i] ^ other[i]).leading_zeros() as usize;
             zeros += inc;
 
             if inc != 8 {
@@ -279,40 +274,19 @@ impl<const N: usize> Key<N> {
             }
         }
 
-        if zeros == Self::bits() {
-            return Self::bits() - 1;
+        if zeros == N8 {
+            return N8 - 1;
         }
         zeros
     }
 
-    const fn bits() -> usize {
-        N * 8
-    }
-}
-
-impl<const N: usize> From<[u8; N]> for Key<N> {
-    fn from(arr: [u8; N]) -> Self {
-        Self(arr)
-    }
-}
-
-impl<const N: usize> PartialEq for Key<N> {
-    fn eq(&self, other: &Self) -> bool {
+    fn eq(key: &[u8; N], other: &[u8; N]) -> bool {
         for i in 0..N {
-            if self.0[i] != other.0[i] {
+            if key[i] != other[i] {
                 return false;
             }
         }
         true
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        for i in 0..N {
-            if self.0[i] != other.0[i] {
-                return true;
-            }
-        }
-        false
     }
 }
 
@@ -324,10 +298,11 @@ const ZEROS: [u8; 8] = [
 #[test]
 fn kbucket_fills_up_nicely() {
     const N: usize = 32;
-    const K: usize = 8 * N;
+    const N8: usize = 8 * N;
+    const K: usize = N8;
     let mut key = [0u8; N];
 
-    let mut kbucket = KBucket::<(), { K }, { N }>::default();
+    let mut kbucket = KBucket::<(), K, N, N8>::default();
     let mut fill = 0;
     for i in 0..N {
         for j in 0..8 {
@@ -343,16 +318,17 @@ fn kbucket_fills_up_nicely() {
 #[test]
 fn kbucket_substitutes_same_key() {
     const N: usize = 32;
-    const K: usize = 8 * N;
+    const N8: usize = 8 * N;
+    const K: usize = N8;
 
     let key = [0u8; N];
-    let other_key = Key({
+    let other_key = {
         let mut key = [0u8; N];
         key[0] = 1;
         key
-    });
+    };
 
-    let mut kbucket = KBucket::<(), { K }, { N }>::default();
+    let mut kbucket = KBucket::<(), K, N, N8>::default();
     kbucket.update(key.into(), ());
     kbucket.update(other_key, ());
     kbucket.update(key.into(), ());
@@ -363,20 +339,22 @@ fn kbucket_substitutes_same_key() {
 #[test]
 fn computed_key_index_correct() {
     const N: usize = 32;
-    let mut key = Key([0u8; N]);
-    let zero_key = Key([0u8; N]);
+    const N8: usize = 8 * N;
+
+    let mut key = [0u8; N];
+    let zero_key = [0u8; N];
 
     // because it's used as an index it should never be N*8
-    assert_eq!(key.index(&zero_key), 255);
+    assert_eq!(Key::<N, N8>::index(&key, &zero_key), 255);
 
     let mut leading = 0;
     for i in 0..N {
         for j in 0..8 {
-            key.0[i] = ZEROS[j];
-            assert_eq!(key.index(&zero_key), leading);
+            key[i] = ZEROS[j];
+            assert_eq!(Key::<N, N8>::index(&key, &zero_key), leading);
             leading += 1;
         }
-        key.0[i] = 0;
+        key[i] = 0;
     }
 }
 
