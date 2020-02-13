@@ -1,7 +1,7 @@
 # Akkad
 
 [![Build Status](https://travis-ci.org/ureeves/akkad.svg?branch=master)](https://travis-ci.org/ureeves/akkad)
-[![codecov](https://codecov.io/gh/ureeves/akkad/branch/master/graph/badge.svg)](https://codecov.io/gh/ureeves/akkad)
+[![Coverage Status](https://coveralls.io/repos/github/ureeves/akkad/badge.svg?branch=master)](https://coveralls.io/github/ureeves/akkad?branch=master)
 
 An experimental implementation of a Kademlia node.
 
