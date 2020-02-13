@@ -153,31 +153,29 @@ impl<'a, 'b, I, const N: usize, const N8: usize, const KN8: usize>
             }
 
             let mut arr = unsafe { (&arr as *const _ as *const [&([u8; N], I); KN8]).read() };
-
-            arr[0..len].sort_by(|lhs, rhs| {
-                let lhs_key = lhs.0;
-                let rhs_key = rhs.0;
-
-                for i in 0..N {
-                    let lhs_xor = key[i] ^ lhs_key[i];
-                    let rhs_xor = key[i] ^ rhs_key[i];
-
-                    if lhs_xor < rhs_xor {
-                        return Ordering::Less;
-                    }
-
-                    if rhs_xor > rhs_xor {
-                        return Ordering::Greater;
-                    }
-                }
-
-                Ordering::Equal
-            });
+            Self::sort_by_distance(key, &mut arr[0..len]);
             arr
         };
-
         let index = 0;
         Self { index, len, arr }
+    }
+
+    fn sort_by_distance(key: &[u8; N], arr: &mut [&([u8; N], I)]) {
+        arr.sort_by(|lhs, rhs| {
+            let lhs_key = lhs.0;
+            let rhs_key = rhs.0;
+            for i in 0..N {
+                let lhs_xor = key[i] ^ lhs_key[i];
+                let rhs_xor = key[i] ^ rhs_key[i];
+                if lhs_xor < rhs_xor {
+                    return Ordering::Less;
+                }
+                if rhs_xor > rhs_xor {
+                    return Ordering::Greater;
+                }
+            }
+            Ordering::Equal
+        });
     }
 }
 
