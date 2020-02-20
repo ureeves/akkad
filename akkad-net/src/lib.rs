@@ -188,7 +188,7 @@ impl RpcGateway {
         // TODO Combat DoS attacks. Memory grows a lot. Rate limiting? How about DDoS?
         let msg = Message::req(*cycle_id, buf);
 
-        let written = match self.shared_state.socket.send_to(&msg.arr[0..msg.len], addr) {
+        let written = match self.shared_state.socket.send_to(&msg.vec[0..msg.len], addr) {
             Ok(written) => written,
             Err(err) => return ResponseFuture::erroring(err.into()),
         };
@@ -272,7 +272,7 @@ fn loop_until_shutdown(
         }
 
         let mut msg = Message::empty();
-        match state.socket.recv_from(&mut msg.arr[..]) {
+        match state.socket.recv_from(&mut msg.vec[..]) {
             Ok((len, addr)) => {
                 // Process the message elsewhere
                 msg.len = len;
@@ -302,12 +302,12 @@ fn process_buffer(
         if msg.len < 4 {
             return;
         }
-        match msg.arr[0] {
+        match msg.vec[0] {
             0x00 => {
                 let mut awaiting_requests = state.awaiting_requests.lock().unwrap();
                 let resp = Responder::new(
                     addr,
-                    CycleId::from_bytes([msg.arr[1], msg.arr[2]]),
+                    CycleId::from_bytes([msg.vec[1], msg.vec[2]]),
                     state.clone(),
                 );
                 // if there is a waiting request just set and wake (if has been polled)
@@ -324,7 +324,7 @@ fn process_buffer(
             }
             0x01 => {
                 let mut awaiting_responses = state.awaiting_responses.lock().unwrap();
-                let cycle_id = CycleId::from_bytes([msg.arr[1], msg.arr[2]]);
+                let cycle_id = CycleId::from_bytes([msg.vec[1], msg.vec[2]]);
 
                 // If there is a pending request set the response and wake,
                 // otherwise drop message.
@@ -475,7 +475,7 @@ impl Responder {
         let state = self.shared_state.clone();
 
         let msg = Message::res(self.cycle_id, buf);
-        match state.socket.send_to(&msg.arr[0..msg.len], self.addr) {
+        match state.socket.send_to(&msg.vec[0..msg.len], self.addr) {
             Ok(written) => Ok(written - 3),
             Err(err) => Err(err.into()),
         }
@@ -549,14 +549,14 @@ const MAX_DATAGRAM_LEN: usize = 65536;
 ///
 /// These messages have a maximum size of 65533 bytes due to protocol overhead.
 pub struct Message {
-    arr: [u8; MAX_DATAGRAM_LEN],
+    vec: Vec<u8>,
     len: usize,
 }
 
 impl Message {
     fn empty() -> Self {
         Self {
-            arr: [0u8; MAX_DATAGRAM_LEN],
+            vec: vec![0; MAX_DATAGRAM_LEN],
             len: 0,
         }
     }
@@ -565,11 +565,11 @@ impl Message {
     fn req(cycle_id: CycleId, buf: &[u8]) -> Self {
         let mut this = Self::empty();
 
-        this.arr[0] = 0x00;
-        this.arr[1..3].copy_from_slice(&cycle_id.to_bytes());
+        this.vec[0] = 0x00;
+        this.vec[1..3].copy_from_slice(&cycle_id.to_bytes());
 
         let to_copy = cmp::min(MAX_DATAGRAM_LEN - 3, buf.len());
-        this.arr[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
+        this.vec[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
         this.len = to_copy + 3;
 
         this
@@ -579,11 +579,11 @@ impl Message {
     fn res(cycle_id: CycleId, buf: &[u8]) -> Self {
         let mut this = Self::empty();
 
-        this.arr[0] = 0x01;
-        this.arr[1..3].copy_from_slice(&cycle_id.to_bytes());
+        this.vec[0] = 0x01;
+        this.vec[1..3].copy_from_slice(&cycle_id.to_bytes());
 
         let to_copy = cmp::min(MAX_DATAGRAM_LEN - 3, buf.len());
-        this.arr[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
+        this.vec[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
         this.len = to_copy + 3;
 
         this
@@ -593,7 +593,7 @@ impl Message {
 impl AsRef<[u8]> for Message {
     /// Returns a slice through the contents of a message.
     fn as_ref(&self) -> &[u8] {
-        &self.arr[3..self.len]
+        &self.vec[3..self.len]
     }
 }
 
@@ -679,4 +679,38 @@ impl AwaitingRequestQueue {
     fn drain(&mut self) -> impl Iterator<Item = Arc<Mutex<RequestSharedState>>> + '_ {
         self.0.drain(..).rev()
     }
+}
+
+#[test]
+fn echoing_gateways() {
+    use futures::executor::block_on;
+    use std::net::SocketAddr;
+
+    // startup two gateways
+    let origin_addr = "127.0.0.1:13562".parse().unwrap();
+    let gateway1 = RpcGateway::bind(origin_addr).expect("couldn't bind to address");
+
+    let dest_addr: SocketAddr = "127.0.0.2:26531".parse().unwrap();
+    let gateway2 = RpcGateway::bind(dest_addr).expect("couldn't bind to address");
+
+    // queue a response to be received by sending a request
+    let response_fut = gateway1.send(b"hello", dest_addr);
+    // queue a request to be received
+    let request_fut = gateway2.recv();
+
+    // block on receiving a request
+    let (msg, resp, addr) = block_on(request_fut).unwrap();
+
+    assert_eq!(msg.as_ref(), b"hello");
+    assert_eq!(addr, origin_addr);
+
+    // respond and block on being responded to
+    resp.respond(b"hello").expect("couldn't say hello back");
+    let (written, msg) = block_on(response_fut).unwrap();
+
+    assert_eq!(msg.as_ref(), b"hello");
+    assert_eq!(written, b"hello".len());
+
+    gateway1.shutdown().unwrap();
+    gateway2.shutdown().unwrap();
 }
