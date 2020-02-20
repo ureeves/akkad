@@ -2,4 +2,5 @@
 
 members = [
     "akkad-rt",
+    "akkad-net",
 ]
