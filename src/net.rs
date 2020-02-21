@@ -749,17 +749,13 @@ fn multiple_echoes() {
     let (msg2, resp2, addr2) = block_on(req2_fut).unwrap();
     let (msg3, resp3, addr3) = block_on(req3_fut).unwrap();
 
-    assert_eq!(msg1.as_ref(), b"hello1");
-    assert_eq!(msg2.as_ref(), b"hello2");
-    assert_eq!(msg3.as_ref(), b"hello3");
-
     assert_eq!(addr1, origin_addr);
     assert_eq!(addr2, origin_addr);
     assert_eq!(addr3, origin_addr);
 
-    resp1.respond(b"hello1").expect("couldn't echo");
-    resp2.respond(b"hello2").expect("couldn't echo");
-    resp3.respond(b"hello3").expect("couldn't echo");
+    resp1.respond(msg1.as_ref()).expect("couldn't echo");
+    resp2.respond(msg2.as_ref()).expect("couldn't echo");
+    resp3.respond(msg3.as_ref()).expect("couldn't echo");
 
     let (written1, msg1) = block_on(res1_fut).unwrap();
     let (written2, msg2) = block_on(res2_fut).unwrap();
