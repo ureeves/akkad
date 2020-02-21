@@ -87,8 +87,8 @@ pub struct RpcGateway {
 }
 
 // TODO Investigate the use of lifetimes to limit memory use - e.g. don't
-//      return a Message -> return a slice over some memory owned by UdpGateway.
-//      May also give some resistance to DoS attacks
+//      return a Message -> return a slice over some memory owned by a
+//      UdpGateway - or by the shared state.
 
 impl RpcGateway {
     /// Creates a [`UdpSocket`] from the given address and starts listening
@@ -98,7 +98,7 @@ impl RpcGateway {
     /// See its documentation and [`UdpSocket::bind`] for more info.
     pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<Self> {
         let udp = UdpSocket::bind(addr)?;
-        // TODO: Investigate consequence of second-long timeout
+        // TODO Investigate consequences of second-long timeout
         udp.set_read_timeout(Some(Duration::from_secs(1)))?;
 
         let (sender, recv) = mpsc::channel();
@@ -234,6 +234,7 @@ impl RpcGateway {
     }
 }
 
+#[derive(Debug)]
 struct ThreadSharedState {
     // Make these all Arc?
     shutdown: RwLock<bool>,
@@ -354,6 +355,27 @@ pub enum Error {
     Shutdown,
 }
 
+impl PartialEq for Error {
+    /// Is true if they're both shutdown errors, or if the [`io::Error`] has
+    /// the same [`io::ErrorKind`].
+    fn eq(&self, rhs: &Self) -> bool {
+        match self {
+            Error::Io(err) => {
+                if let Error::Io(rhs_err) = rhs {
+                    return err.kind() == rhs_err.kind();
+                }
+                false
+            }
+            Error::Shutdown => {
+                if let Error::Shutdown = rhs {
+                    return true;
+                }
+                false
+            }
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
         match self {
@@ -421,6 +443,7 @@ impl RequestFuture {
     }
 }
 
+#[derive(Debug)]
 struct RequestSharedState {
     result: Option<Result<(Message, Responder, SocketAddr)>>,
     waker: Option<Waker>,
@@ -453,6 +476,7 @@ impl RequestSharedState {
 }
 
 /// Allows responding to incoming requests.
+#[derive(Debug)]
 pub struct Responder {
     addr: SocketAddr,
     cycle_id: CycleId,
@@ -516,6 +540,7 @@ impl Future for ResponseFuture {
 
 /// The state shared between the running thread and a single request-response
 /// cycle.
+#[derive(Debug)]
 struct ResponseSharedState {
     bytes_consumed: usize,
     result: Option<Result<Message>>,
@@ -547,6 +572,7 @@ const MAX_DATAGRAM_LEN: usize = 65536;
 /// Network message to be processed by a [`RpcGateway`].
 ///
 /// These messages have a maximum size of 65533 bytes due to protocol overhead.
+#[derive(Debug)]
 pub struct Message {
     vec: Vec<u8>,
     len: usize,
@@ -596,7 +622,7 @@ impl AsRef<[u8]> for Message {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CycleId(u16);
 
 impl CycleId {
@@ -622,6 +648,7 @@ impl CycleId {
 ///
 /// This allows us to map pending request-response cycles to a way to notify
 /// the executor that a response is ready for consumption.
+#[derive(Debug)]
 struct AwaitingResponseMap(HashMap<(SocketAddr, CycleId), Arc<Mutex<ResponseSharedState>>>);
 
 impl AwaitingResponseMap {
@@ -656,6 +683,7 @@ impl AwaitingResponseMap {
 }
 
 /// FIFO queue allowing us to enqueue waiting request futures.
+#[derive(Debug)]
 struct AwaitingRequestQueue(Vec<Arc<Mutex<RequestSharedState>>>);
 
 impl AwaitingRequestQueue {
@@ -681,35 +709,70 @@ impl AwaitingRequestQueue {
 }
 
 #[test]
-fn echoing_gateways() {
+fn clean_shutdown() {
     use futures::executor::block_on;
-    use std::net::SocketAddr;
+
+    let gateway = RpcGateway::bind("127.0.0.1:12345").expect("couldn't bind to address");
+
+    let res_fut = gateway.send(b"hello", "127.0.0.2:12345");
+    let req_fut = gateway.recv();
+
+    gateway.shutdown().expect("not a clean shutdown");
+
+    let res_err = block_on(res_fut).expect_err("not an error");
+    let req_err = block_on(req_fut).expect_err("not an error");
+
+    assert_eq!(res_err, Error::Shutdown);
+    assert_eq!(req_err, Error::Shutdown);
+}
+
+#[test]
+fn multiple_echoes() {
+    use futures::executor::block_on;
 
     // startup two gateways
     let origin_addr = "127.0.0.1:13562".parse().unwrap();
-    let gateway1 = RpcGateway::bind(origin_addr).expect("couldn't bind to address");
+    let gateway_origin = RpcGateway::bind(origin_addr).expect("couldn't bind to address");
 
     let dest_addr: SocketAddr = "127.0.0.2:26531".parse().unwrap();
-    let gateway2 = RpcGateway::bind(dest_addr).expect("couldn't bind to address");
+    let gateway_dest = RpcGateway::bind(dest_addr).expect("couldn't bind to address");
 
-    // queue a response to be received by sending a request
-    let response_fut = gateway1.send(b"hello", dest_addr);
-    // queue a request to be received
-    let request_fut = gateway2.recv();
+    let res1_fut = gateway_origin.send(b"hello1", dest_addr);
+    let res2_fut = gateway_origin.send(b"hello2", dest_addr);
+    let res3_fut = gateway_origin.send(b"hello3", dest_addr);
 
-    // block on receiving a request
-    let (msg, resp, addr) = block_on(request_fut).unwrap();
+    let req1_fut = gateway_dest.recv();
+    let req2_fut = gateway_dest.recv();
+    let req3_fut = gateway_dest.recv();
 
-    assert_eq!(msg.as_ref(), b"hello");
-    assert_eq!(addr, origin_addr);
+    let (msg1, resp1, addr1) = block_on(req1_fut).unwrap();
+    let (msg2, resp2, addr2) = block_on(req2_fut).unwrap();
+    let (msg3, resp3, addr3) = block_on(req3_fut).unwrap();
 
-    // respond and block on being responded to
-    resp.respond(b"hello").expect("couldn't say hello back");
-    let (written, msg) = block_on(response_fut).unwrap();
+    assert_eq!(msg1.as_ref(), b"hello1");
+    assert_eq!(msg2.as_ref(), b"hello2");
+    assert_eq!(msg3.as_ref(), b"hello3");
 
-    assert_eq!(msg.as_ref(), b"hello");
-    assert_eq!(written, b"hello".len());
+    assert_eq!(addr1, origin_addr);
+    assert_eq!(addr2, origin_addr);
+    assert_eq!(addr3, origin_addr);
 
-    gateway1.shutdown().unwrap();
-    gateway2.shutdown().unwrap();
+    resp1.respond(b"hello1").expect("couldn't echo");
+    resp2.respond(b"hello2").expect("couldn't echo");
+    resp3.respond(b"hello3").expect("couldn't echo");
+
+    let (written1, msg1) = block_on(res1_fut).unwrap();
+    let (written2, msg2) = block_on(res2_fut).unwrap();
+    let (written3, msg3) = block_on(res3_fut).unwrap();
+
+    assert_eq!(msg1.as_ref(), b"hello1");
+    assert_eq!(msg2.as_ref(), b"hello2");
+    assert_eq!(msg3.as_ref(), b"hello3");
+
+    assert_eq!(written1, b"hello1".len());
+    assert_eq!(written2, b"hello2".len());
+    assert_eq!(written3, b"hello3".len());
+
+    gateway_origin.shutdown().expect("error on shutdown");
+    gateway_dest.shutdown().expect("error on shutdown");
 }
