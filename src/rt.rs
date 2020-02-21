@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```
-//! use akkad_rt::RoutingTable;
+//! use akkad::rt::RoutingTable;
 //!
 //! let host_key = [0u8; 1];
 //! let mut rt = RoutingTable::new(host_key.clone(), ());
@@ -26,9 +26,6 @@
 //! assert_eq!(elem1.0[0], 1);
 //! assert_eq!(elem2.0[0], 2);
 //! ```
-#![allow(incomplete_features)]
-#![feature(const_generics)]
-#![deny(missing_docs)]
 
 use core::cmp::Ordering;
 use core::mem::{self, MaybeUninit};
@@ -45,7 +42,7 @@ impl<I, const N: usize> RoutingTable<I, N> {
     ///
     /// # Example
     /// ```
-    /// use akkad_rt::RoutingTable;
+    /// use akkad::rt::RoutingTable;
     ///
     /// let host_key = [0u8; 1];
     /// let mut rt = RoutingTable::new(host_key, ());
@@ -61,7 +58,7 @@ impl<I, const N: usize> RoutingTable<I, N> {
     ///
     /// # Example
     /// ```
-    /// use akkad_rt::RoutingTable;
+    /// use akkad::rt::RoutingTable;
     ///
     /// let host_key = [0u8; 1];
     /// let mut rt = RoutingTable::new(host_key, ());
@@ -78,7 +75,7 @@ impl<I, const N: usize> RoutingTable<I, N> {
     ///
     /// # Example
     /// ```
-    /// use akkad_rt::RoutingTable;
+    /// use akkad::rt::RoutingTable;
     ///
     /// let host_key = [0u8; 1];
     /// let mut rt = RoutingTable::new(host_key.clone(), ());

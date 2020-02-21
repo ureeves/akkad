@@ -1,6 +1,11 @@
-[workspace]
+[package]
+name = "akkad"
+version = "0.1.0"
+authors = ["Eduardo Leegwater Simões <eduardols@protonmail.com>"]
+edition = "2018"
 
-members = [
-    "akkad-rt",
-    "akkad-net",
-]
+[dependencies]
+
+[dev-dependencies]
+futures = "0.3.4"
+rand = "0.7.3"

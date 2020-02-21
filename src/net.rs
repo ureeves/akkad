@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```
-//! use akkad_net::RpcGateway;
+//! use akkad::net::RpcGateway;
 //! use std::net::SocketAddr;
 //! use futures::executor::block_on;
 //!
@@ -62,7 +62,6 @@
 //!
 //! The gateway will - internally - continuously processes arriving messages,
 //! and forwards them sequencially to the returned [`Future`]s.
-#![deny(missing_docs)]
 use std::{
     any::Any,
     cmp,
