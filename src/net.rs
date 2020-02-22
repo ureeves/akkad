@@ -321,9 +321,14 @@ fn loop_until_shutdown(
             Err(err) => {
                 // Timeouts are a good thing, since they allow stopping
                 // without first receiving a datagram.
-                if err.kind() != io::ErrorKind::TimedOut {
-                    *state.error.write().unwrap() = Some(err.into());
-                    break;
+                let err_kind = err.kind();
+                match err_kind {
+                    io::ErrorKind::WouldBlock => {}
+                    io::ErrorKind::TimedOut => {}
+                    _ => {
+                        *state.error.write().unwrap() = Some(err.into());
+                        break;
+                    }
                 }
             }
         }
@@ -788,15 +793,17 @@ fn clean_shutdown() {
 }
 
 #[test]
-fn response_will_timeout() {
+fn response_timeout() {
     use futures::executor::block_on;
 
-    let gateway = RpcGateway::bind("127.0.0.1:0").expect("couldn't bind to address");
+    let gateway = RpcGateway::bind("127.0.0.1:12346").expect("couldn't bind to address");
     gateway.set_response_timeout(Duration::from_secs(1));
 
-    let res_fut = gateway.send(b"lost to the ether", "8.8.8.8:12345");
-    block_on(res_fut).expect_err("expected timeout error");
+    // send back to ourselves
+    let res_fut = gateway.send(b"lost to the ether", "127.0.0.1:12346");
+    let err = block_on(res_fut).expect_err("not an error");
 
+    assert_eq!(err, Error::Timeout);
     gateway.shutdown().unwrap();
 }
 
