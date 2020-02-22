@@ -77,7 +77,7 @@ use std::{
     },
     task::{Context, Poll, Waker},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// RPC gateway allowing for asynchronous request-response cycles over UDP.
@@ -116,6 +116,15 @@ impl RpcGateway {
             handle: handle,
             shared_state: shared_state,
         })
+    }
+
+    /// Sets the timeout for a response to a request.
+    ///
+    /// A response timeout isn't exact, and one should consider a maximum of
+    /// approximately twice the inserted value. As an example, if the timeout
+    /// is set to be 5 secs, then a response will timeout before 10 secs.
+    pub fn set_response_timeout(&self, timeout: Duration) {
+        *self.shared_state.response_timeout.write().unwrap() = timeout;
     }
 
     /// Returns a future that on which to `await` yielding a request message,
@@ -244,6 +253,7 @@ struct ThreadSharedState {
     socket: UdpSocket,
     awaiting_requests: Mutex<AwaitingRequestQueue>,
     receiver: Mutex<Receiver<(Message, Responder, SocketAddr)>>,
+    response_timeout: RwLock<Duration>,
 }
 
 impl ThreadSharedState {
@@ -256,6 +266,7 @@ impl ThreadSharedState {
             cycle_id: Mutex::new(CycleId::new()),
             awaiting_responses: Mutex::new(AwaitingResponseMap::new()),
             awaiting_requests: Mutex::new(AwaitingRequestQueue::new()),
+            response_timeout: RwLock::new(Duration::from_secs(30)),
         }
     }
 }
@@ -265,10 +276,39 @@ fn loop_until_shutdown(
     state: Arc<ThreadSharedState>,
     sender: Sender<(Message, Responder, SocketAddr)>,
 ) {
+    let mut past = Instant::now();
+
     loop {
         if *state.shutdown.read().unwrap() {
             *state.error.write().unwrap() = Some(Error::Shutdown);
             break;
+        }
+
+        // Every `response_timeout` see if some responses are taking more
+        // than `response_timeout` secs, and eject them from the map, setting Error::Timeout.
+        let response_timeout = state.response_timeout.read().unwrap().clone();
+        if past.elapsed() > response_timeout {
+            let mut rss_vec = Vec::new();
+            let mut awaiting_responses = state.awaiting_responses.lock().unwrap();
+
+            for (key, rss) in awaiting_responses.iter() {
+                let rss_guard = rss.lock().unwrap();
+                if rss_guard.created.elapsed() > response_timeout {
+                    rss_vec.push((key.clone(), rss.clone()))
+                }
+            }
+
+            for (key, rss) in rss_vec {
+                awaiting_responses.pop(&key);
+
+                let mut rss = rss.lock().unwrap();
+                rss.result = Some(Err(Error::Timeout));
+                if let Some(waker) = rss.waker.take() {
+                    waker.wake();
+                }
+            }
+
+            past = Instant::now();
         }
 
         let mut msg = Message::empty();
@@ -353,11 +393,14 @@ pub enum Error {
 
     /// When something could be completed due to shutdown.
     Shutdown,
+
+    /// Timed out waiting for a response to a request.
+    Timeout,
 }
 
 impl PartialEq for Error {
-    /// Is true if they're both shutdown errors, or if the [`io::Error`] has
-    /// the same [`io::ErrorKind`].
+    /// Is true if they're both shutdown or timeout errors, or if the
+    /// [`io::Error`] has the same [`io::ErrorKind`].
     fn eq(&self, rhs: &Self) -> bool {
         match self {
             Error::Io(err) => {
@@ -372,6 +415,12 @@ impl PartialEq for Error {
                 }
                 false
             }
+            Error::Timeout => {
+                if let Error::Timeout = rhs {
+                    return true;
+                }
+                false
+            }
         }
     }
 }
@@ -381,6 +430,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(err) => write!(f, "RpcGateway: {}", err),
             Error::Shutdown => write!(f, "RpcGateway: Shutdown"),
+            Error::Timeout => write!(f, "RpcGateway: Timeout"),
         }
     }
 }
@@ -392,6 +442,7 @@ impl Clone for Error {
         match self {
             Self::Io(err) => Self::Io(io::Error::from(err.kind())),
             Self::Shutdown => Self::Shutdown,
+            Self::Timeout => Self::Timeout,
         }
     }
 }
@@ -545,6 +596,7 @@ struct ResponseSharedState {
     bytes_consumed: usize,
     result: Option<Result<Message>>,
     waker: Option<Waker>,
+    created: Instant,
 }
 
 impl ResponseSharedState {
@@ -554,6 +606,7 @@ impl ResponseSharedState {
             bytes_consumed: bytes_consumed,
             result: None,
             waker: None,
+            created: Instant::now(),
         }))
     }
 
@@ -563,6 +616,7 @@ impl ResponseSharedState {
             bytes_consumed: 0,
             result: Some(Err(err)),
             waker: None,
+            created: Instant::now(),
         }))
     }
 }
@@ -674,6 +728,13 @@ impl AwaitingResponseMap {
         self.0.remove(key)
     }
 
+    /// Iterates through all values of the map
+    fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&(SocketAddr, CycleId), &Arc<Mutex<ResponseSharedState>>)> + '_ {
+        self.0.iter()
+    }
+
     /// Empties the map and returns all the values as an iterator.
     fn drain(
         &mut self,
@@ -724,6 +785,19 @@ fn clean_shutdown() {
 
     assert_eq!(res_err, Error::Shutdown);
     assert_eq!(req_err, Error::Shutdown);
+}
+
+#[test]
+fn response_will_timeout() {
+    use futures::executor::block_on;
+
+    let gateway = RpcGateway::bind("127.0.0.1:0").expect("couldn't bind to address");
+    gateway.set_response_timeout(Duration::from_secs(1));
+
+    let res_fut = gateway.send(b"lost to the ether", "8.8.8.8:12345");
+    block_on(res_fut).expect_err("expected timeout error");
+
+    gateway.shutdown().unwrap();
 }
 
 #[test]
