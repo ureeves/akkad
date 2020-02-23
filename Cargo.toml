@@ -5,7 +5,10 @@ authors = ["Eduardo Leegwater Simões <eduardols@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
+digest = "0.8.1"
+rand = "0.6.5"
 
 [dev-dependencies]
+sha2 = "0.8.1"
+secp256k1 = { version = "0.17.2", features = ["rand"] }
 futures = "0.3.4"
-rand = "0.7.3"
