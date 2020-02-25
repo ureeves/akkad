@@ -1,24 +1,20 @@
 //! Routing table for a Kademlia decentralized hash table.
 //!
-//! This crate only compiles on nightly due to the use of feature flags. When
-//! [`const_generics`](https://github.com/rust-lang/rust/issues/44580) is
-//! stabilized this will change.
-//!
 //! # Example
 //!
 //! ```
 //! use akkad::rt::RoutingTable;
 //!
 //! let host_key = [0u8; 1];
-//! let mut rt = RoutingTable::new(host_key.clone(), ());
+//! let mut rt = RoutingTable::new(host_key.clone().into(), ());
 //!
 //! let key = [1u8; 1];
-//! rt.update(key, ());
+//! rt.update(key.into(), ());
 //!
 //! let key = [2u8; 1];
-//! rt.update(key, ());
+//! rt.update(key.into(), ());
 //!
-//! let mut closest = rt.closest(&host_key);
+//! let mut closest = rt.closest(&host_key.into());
 //!
 //! let elem1 = closest.next().unwrap();
 //! let elem2 = closest.next().unwrap();
@@ -26,17 +22,39 @@
 //! assert_eq!(elem1.0[0], 1);
 //! assert_eq!(elem2.0[0], 2);
 //! ```
+use arrayvec::{Array as ArrayTrait, ArrayVec};
+use core::{cmp::Ordering, ops::Mul};
+use generic_array::{
+    typenum::{
+        consts::{U20, U8},
+        Prod, Unsigned,
+    },
+    ArrayLength, GenericArray,
+};
 
-use core::cmp::Ordering;
-use core::mem::{self, MaybeUninit};
+// TODO Tweak this parameter. In the paper they say 20. Is this a good value?
+type KParam = U20;
 
-/// The size of a KBucket.
-const K_PARAM: usize = 20;
+type Key<N> = GenericArray<u8, N>;
+type KBucket<I, N> = ArrayVec<Array<(Key<N>, I), KParam>>;
 
-/// A Kademlia routing table for storing information about keys.
-pub struct RoutingTable<I, const N: usize>(ExpandedRoutingTable<I, { N }, { N * 8 }>);
+/// Routing table based on the XOR metric for a Kademlia DHT.
+pub struct RoutingTable<I, N>
+where
+    N: ArrayLength<u8> + Mul<U8>,
+    Prod<N, U8>: ArrayLength<KBucket<I, N>>,
+{
+    key: GenericArray<u8, N>,
+    _info: I,
+    table: ArrayVec<Array<KBucket<I, N>, Prod<N, U8>>>,
+}
 
-impl<I, const N: usize> RoutingTable<I, N> {
+impl<I, N> RoutingTable<I, N>
+where
+    N: ArrayLength<u8> + Mul<U8>,
+    Prod<N, U8>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
+    for<'a> Prod<Prod<N, U8>, KParam>: ArrayLength<&'a (Key<N>, I)>,
+{
     /// Creates a new empty routing table with key and info belonging to the
     /// local node.
     ///
@@ -45,10 +63,17 @@ impl<I, const N: usize> RoutingTable<I, N> {
     /// use akkad::rt::RoutingTable;
     ///
     /// let host_key = [0u8; 1];
-    /// let mut rt = RoutingTable::new(host_key, ());
+    /// let mut rt = RoutingTable::new(host_key.into(), ());
     /// ```
-    pub fn new(key: [u8; N], info: I) -> Self {
-        Self(ExpandedRoutingTable::new(key, info))
+    pub fn new(key: Key<N>, info: I) -> Self {
+        let mut table = ArrayVec::new();
+        for _ in 0..<Prod<N, U8>>::USIZE {
+            table.push(ArrayVec::new());
+        }
+
+        let key = key.into();
+        let _info = info;
+        Self { key, _info, table }
     }
 
     /// Update the routing table with key and info.
@@ -61,13 +86,31 @@ impl<I, const N: usize> RoutingTable<I, N> {
     /// use akkad::rt::RoutingTable;
     ///
     /// let host_key = [0u8; 1];
-    /// let mut rt = RoutingTable::new(host_key, ());
+    /// let mut rt = RoutingTable::new(host_key.into(), ());
     ///
     /// let key = [1u8; 1];
-    /// rt.update(key, ());
+    /// rt.update(key.into(), ());
     /// ```
-    pub fn update(&mut self, key: [u8; N], info: I) -> Option<([u8; N], I)> {
-        self.0.update(key, info)
+    pub fn update(&mut self, key: Key<N>, info: I) -> Option<(Key<N>, I)> {
+        let key = key.into();
+        let bucket_index = rt_kbucket_index(&self.key, &key);
+
+        // if table has key eject information and push new to the front of the
+        // kbucket
+        if let Some(index) = rt_kbucket_contains(&self.table[bucket_index], &key) {
+            self.table[bucket_index].remove(index);
+            self.table[bucket_index].insert(0, (key, info));
+            return None;
+        }
+
+        if self.table[bucket_index].is_full() {
+            let elem = self.table[bucket_index].pop();
+            // absolutely sure this returns Some(_)
+            return elem;
+        }
+
+        self.table[bucket_index].insert(0, (key, info));
+        None
     }
 
     /// Returns an iterator through the table - ordered by closest to the key
@@ -78,90 +121,111 @@ impl<I, const N: usize> RoutingTable<I, N> {
     /// use akkad::rt::RoutingTable;
     ///
     /// let host_key = [0u8; 1];
-    /// let mut rt = RoutingTable::new(host_key.clone(), ());
+    /// let mut rt = RoutingTable::new(host_key.clone().into(), ());
     ///
     /// let key1 = [1u8; 1];
     /// let key2 = [2u8; 1];
-    /// rt.update(key1, ());
-    /// rt.update(key2, ());
+    /// rt.update(key1.into(), ());
+    /// rt.update(key2.into(), ());
     ///
-    /// for elem in rt.closest(&host_key) {
+    /// for elem in rt.closest(&host_key.into()) {
     ///     // do something with the elements
     /// }
     /// ```
-    pub fn closest(&self, key: &[u8; N]) -> impl Iterator<Item = &([u8; N], I)> {
-        self.0.closest(key)
+    pub fn closest(&self, key: &Key<N>) -> impl Iterator<Item = &(Key<N>, I)> {
+        ClosestIterator::new(key, self)
     }
 }
 
-struct ExpandedRoutingTable<I, const N: usize, const N8: usize> {
-    key: [u8; N],
-    _info: I,
-    table: [KBucket<I, K_PARAM, N, N8>; N8],
-}
-
-impl<I, const N: usize, const N8: usize> ExpandedRoutingTable<I, N, N8> {
-    fn new(key: [u8; N], _info: I) -> Self {
-        let mut data: [MaybeUninit<KBucket<I, K_PARAM, N, N8>>; N8] =
-            unsafe { MaybeUninit::uninit().assume_init() };
-
-        for i in 0..N8 {
-            data[i] = MaybeUninit::new(KBucket::default());
+fn rt_keys_equal<N>(lhs: &Key<N>, rhs: &Key<N>) -> bool
+where
+    N: ArrayLength<u8>,
+{
+    for i in 0..N::USIZE {
+        if lhs[i] != rhs[i] {
+            return false;
         }
-
-        let table =
-            unsafe { (&data as *const _ as *const [KBucket<I, K_PARAM, N, N8>; N8]).read() };
-        Self { key, _info, table }
     }
 
-    fn update(&mut self, key: [u8; N], info: I) -> Option<([u8; N], I)> {
-        let index = Key::<N, N8>::index(&self.key, &key);
-        self.table[index].update(key, info)
-    }
-
-    pub fn closest(&self, key: &[u8; N]) -> impl Iterator<Item = &([u8; N], I)> {
-        ClosestIterator::<I, N, N8, { K_PARAM * N8 }>::new(key, self)
-    }
+    true
 }
 
-struct ClosestIterator<'a, I, const N: usize, const N8: usize, const KN8: usize> {
+fn rt_kbucket_contains<I, N>(bucket: &KBucket<I, N>, key: &Key<N>) -> Option<usize>
+where
+    N: ArrayLength<u8>,
+{
+    for (index, elem) in bucket.iter().enumerate() {
+        if rt_keys_equal(&elem.0, key) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn rt_kbucket_index<N>(key: &Key<N>, other: &Key<N>) -> usize
+where
+    N: ArrayLength<u8>,
+{
+    let mut zeros = 0;
+    for i in 0..N::USIZE {
+        let inc = (key[i] ^ other[i]).leading_zeros() as usize;
+        zeros += inc;
+
+        if inc != 8 {
+            break;
+        }
+    }
+
+    if zeros == N::USIZE * 8 {
+        return N::USIZE * 8 - 1;
+    }
+    zeros
+}
+
+struct ClosestIterator<'a, I, N>
+where
+    N: ArrayLength<u8> + Mul<U8>,
+    Prod<N, U8>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
+    Prod<Prod<N, U8>, KParam>: ArrayLength<&'a (Key<N>, I)>,
+{
     index: usize,
     len: usize,
-    arr: [&'a ([u8; N], I); KN8],
+    arr: ArrayVec<Array<&'a (Key<N>, I), Prod<Prod<N, U8>, KParam>>>,
 }
 
-impl<'a, 'b, I, const N: usize, const N8: usize, const KN8: usize>
-    ClosestIterator<'a, I, N, N8, KN8>
+impl<'a, I, N> ClosestIterator<'a, I, N>
+where
+    N: ArrayLength<u8> + Mul<U8>,
+    Prod<N, U8>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
+    Prod<Prod<N, U8>, KParam>: ArrayLength<&'a (Key<N>, I)>,
 {
-    fn new(key: &[u8; N], ert: &'a ExpandedRoutingTable<I, N, N8>) -> Self {
+    fn new(key: &Key<N>, rt: &'a RoutingTable<I, N>) -> Self {
         let mut len = 0;
+        let mut arr = ArrayVec::new();
 
-        let arr = {
-            let mut arr: [MaybeUninit<&([u8; N], I)>; KN8] =
-                unsafe { MaybeUninit::uninit().assume_init() };
-
-            for i in 0..N8 {
-                let filled = ert.table[i].filled;
-                for j in 0..filled {
-                    let elem = unsafe { &*ert.table[i].arr[j].as_ptr() };
-                    arr[len + j] = MaybeUninit::new(elem);
-                }
-                len += filled;
+        for index in 0..<Prod<N, U8>>::USIZE {
+            let filled = rt.table[index].len();
+            for elem in &rt.table[index] {
+                arr.push(elem);
             }
+            len += filled;
+        }
 
-            let mut arr = unsafe { (&arr as *const _ as *const [&([u8; N], I); KN8]).read() };
-            Self::sort_by_distance(key, &mut arr[0..len]);
-            arr
-        };
+        Self::sort_by_distance(key, &mut arr);
+
         let index = 0;
         Self { index, len, arr }
     }
 
-    fn sort_by_distance(key: &[u8; N], arr: &mut [&([u8; N], I)]) {
+    fn sort_by_distance(
+        key: &Key<N>,
+        arr: &mut ArrayVec<Array<&'a (Key<N>, I), Prod<Prod<N, U8>, KParam>>>,
+    ) {
         arr.sort_by(|lhs, rhs| {
-            let lhs_key = lhs.0;
-            let rhs_key = rhs.0;
-            for i in 0..N {
+            let lhs_key = &lhs.0;
+            let rhs_key = &rhs.0;
+
+            for i in 0..N::USIZE {
                 let lhs_xor = key[i] ^ lhs_key[i];
                 let rhs_xor = key[i] ^ rhs_key[i];
                 if lhs_xor < rhs_xor {
@@ -176,10 +240,13 @@ impl<'a, 'b, I, const N: usize, const N8: usize, const KN8: usize>
     }
 }
 
-impl<'a, I, const N: usize, const N8: usize, const KN8: usize> Iterator
-    for ClosestIterator<'a, I, N, N8, KN8>
+impl<'a, I, N> Iterator for ClosestIterator<'a, I, N>
+where
+    N: ArrayLength<u8> + Mul<U8>,
+    Prod<N, U8>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
+    Prod<Prod<N, U8>, KParam>: ArrayLength<&'a (Key<N>, I)>,
 {
-    type Item = &'a ([u8; N], I);
+    type Item = &'a (Key<N>, I);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index == self.len {
@@ -193,95 +260,28 @@ impl<'a, I, const N: usize, const N8: usize, const KN8: usize> Iterator
     }
 }
 
-/// A fixed-sized array-backed FIFO queue with insertion capabilities.
-struct KBucket<I, const K_PARAM: usize, const N: usize, const N8: usize> {
-    arr: [MaybeUninit<([u8; N], I)>; K_PARAM],
-    filled: usize,
-}
+/// An array type using [`generic_array::GenericArray`] and implementing
+/// [`arrayvec::Array`].
+///
+/// Can be stored directly on the stack if needed.
+///
+/// This allows for an ArrayVec of any size to be constructed with any element
+/// type - including another ArrayVec. It's used for the [`RoutingTable`].
+pub struct Array<T, N: ArrayLength<T>>(GenericArray<T, N>);
 
-impl<I, const K_PARAM: usize, const N: usize, const N8: usize> Default
-    for KBucket<I, K_PARAM, N, N8>
-{
-    fn default() -> Self {
-        Self {
-            arr: unsafe { MaybeUninit::uninit().assume_init() },
-            filled: 0,
-        }
-    }
-}
+unsafe impl<T, N: ArrayLength<T>> ArrayTrait for Array<T, N> {
+    type Item = T;
 
-impl<I, const K_PARAM: usize, const N: usize, const N8: usize> KBucket<I, K_PARAM, N, N8> {
-    fn update(&mut self, key: [u8; N], info: I) -> Option<([u8; N], I)> {
-        if let Some(index) = self.index(&key) {
-            let info = self.replace_with_until(index, key, info);
-            unsafe { info.assume_init() };
-            return None;
-        }
+    type Index = usize;
 
-        if self.filled == K_PARAM {
-            let info = self.replace_with_until(K_PARAM - 1, key, info);
-            return Some(unsafe { info.assume_init() });
-        }
+    const CAPACITY: usize = N::USIZE;
 
-        self.replace_with_until(self.filled, key, info);
-        self.filled += 1;
-
-        None
+    fn as_slice(&self) -> &[Self::Item] {
+        &self.0
     }
 
-    /// Displaces the elements of the vector until and including `index`.
-    fn replace_with_until(
-        &mut self,
-        index: usize,
-        key: [u8; N],
-        info: I,
-    ) -> MaybeUninit<([u8; N], I)> {
-        let mut info = MaybeUninit::new((key, info));
-        for i in 0..=index {
-            info = mem::replace(&mut self.arr[i], info);
-        }
-        info
-    }
-
-    /// `Some(index)` if a node with the same key is in the bucket, `None` if not.
-    fn index(&self, key: &[u8; N]) -> Option<usize> {
-        for i in 0..self.filled {
-            let self_key = &unsafe { &*self.arr[i].as_ptr() }.0;
-            if Key::<N, N8>::eq(self_key, key) {
-                return Some(i);
-            }
-        }
-        None
-    }
-}
-
-struct Key<const N: usize, const N8: usize>;
-
-impl<const N: usize, const N8: usize> Key<N, N8> {
-    fn index(key: &[u8; N], other: &[u8; N]) -> usize {
-        let mut zeros = 0;
-        for i in 0..N {
-            let inc = (key[i] ^ other[i]).leading_zeros() as usize;
-            zeros += inc;
-
-            if inc != 8 {
-                break;
-            }
-        }
-
-        if zeros == N8 {
-            return N8 - 1;
-        }
-        zeros
-    }
-
-    fn eq(key: &[u8; N], other: &[u8; N]) -> bool {
-        for i in 0..N {
-            if key[i] != other[i] {
-                return false;
-            }
-        }
-        true
+    fn as_mut_slice(&mut self) -> &mut [Self::Item] {
+        &mut self.0
     }
 }
 
@@ -293,60 +293,60 @@ const ZEROS: [u8; 8] = [
 #[test]
 fn kbucket_fills_up_nicely() {
     const N: usize = 32;
-    const N8: usize = 8 * N;
-    const K: usize = N8;
     let mut key = [0u8; N];
 
-    let mut kbucket = KBucket::<(), K, N, N8>::default();
-    let mut fill = 0;
-    for i in 0..N {
-        for j in 0..8 {
-            key[i] = ZEROS[j];
-            assert_eq!(kbucket.filled, fill);
+    let mut rt = RoutingTable::new(key.clone().into(), ());
 
-            kbucket.update(key.into(), ());
-            fill += 1;
-        }
+    key[0] = 1;
+    for _ in 0..KParam::USIZE {
+        key[N - 1] += 1;
+        rt.update(key.clone().into(), ());
     }
+    assert_eq!(rt.table[7].len(), KParam::USIZE);
 }
 
 #[test]
 fn kbucket_substitutes_same_key() {
     const N: usize = 32;
     const N8: usize = 8 * N;
-    const K: usize = N8;
 
     let key = [0u8; N];
     let other_key = {
         let mut key = [0u8; N];
-        key[0] = 1;
+        key[N - 1] = 1;
         key
     };
 
-    let mut kbucket = KBucket::<(), K, N, N8>::default();
-    kbucket.update(key.into(), ());
-    kbucket.update(other_key, ());
-    kbucket.update(key.into(), ());
+    let mut table = RoutingTable::new(key.clone().into(), ());
 
-    assert_eq!(kbucket.filled, 2);
+    table.update(key.into(), ());
+    table.update(other_key.into(), ());
+    table.update(key.into(), ());
+
+    assert_eq!(table.table[N8 - 1].len(), 2);
 }
 
 #[test]
 fn computed_key_index_correct() {
     const N: usize = 32;
-    const N8: usize = 8 * N;
 
     let mut key = [0u8; N];
     let zero_key = [0u8; N];
 
     // because it's used as an index it should never be N*8
-    assert_eq!(Key::<N, N8>::index(&key, &zero_key), 255);
+    assert_eq!(
+        rt_kbucket_index(&key.clone().into(), &zero_key.clone().into()),
+        255
+    );
 
     let mut leading = 0;
     for i in 0..N {
         for j in 0..8 {
             key[i] = ZEROS[j];
-            assert_eq!(Key::<N, N8>::index(&key, &zero_key), leading);
+            assert_eq!(
+                rt_kbucket_index(&key.clone().into(), &zero_key.clone().into()),
+                leading
+            );
             leading += 1;
         }
         key[i] = 0;
@@ -360,25 +360,24 @@ fn closest_iterator_ordering() {
 
     const N: usize = 1;
 
-    let mut key = [0u8; N];
-    let host_key = key.clone();
+    let host_key = [0u8; 1];
+    let mut key = host_key.clone();
+    let mut rt = RoutingTable::new(host_key.into(), ());
 
-    let mut rt = RoutingTable::new(host_key.clone(), ());
-
-    rt.update([0], ());
-    rt.update([1], ());
+    rt.update([0].into(), ());
+    rt.update([1].into(), ());
     for _ in 0..10 * N {
         rng.fill_bytes(&mut key[..]);
-        rt.update(key.clone(), ());
+        rt.update(key.clone().into(), ());
     }
 
-    let mut iter = rt.closest(&host_key);
+    let mut iter = rt.closest(&host_key.into());
 
     let mut tmp = iter
         .next()
         .expect("expected at least one element in the iterator");
     for elem in iter {
-        assert_eq!(tmp.0[0] < elem.0[0], true);
+        assert_eq!(tmp.0[0] <= elem.0[0], true);
         tmp = elem;
     }
 }

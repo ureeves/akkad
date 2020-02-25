@@ -10,16 +10,15 @@ addons:
 
 cache: cargo
 rust:
+    - stable
+    - beta
     - nightly
-    # litmus test for when const_generics stabilizes
-    # - stable
-    # - beta
-# matrix:
-#     allow_failures:
-#         - rust: nightly
+matrix:
+    allow_failures:
+        - rust: nightly
 
 before_cache: |
-  if [[ "$TRAVIS_RUST_VERSION" == nightly ]]; then
+  if [[ "$TRAVIS_RUST_VERSION" == stable ]]; then
     cargo install cargo-tarpaulin
   fi
 
@@ -29,6 +28,6 @@ script:
 - cargo test
 
 after_success: |
-  if [[ "$TRAVIS_RUST_VERSION" == nightly ]]; then
+  if [[ "$TRAVIS_RUST_VERSION" == stable ]]; then
     cargo tarpaulin --ciserver travis-ci --coveralls $TRAVIS_JOB_ID
   fi

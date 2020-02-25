@@ -8,17 +8,6 @@ An experimental implementation of a Kademlia node.
 ## Dependencies
 
 To build this project you'll need a [Rust toolchain](https://www.rust-lang.org/tools/install).
-Unfortunately it only builds on nightly.
-
-```sh
-rustup toolchain add nightly
-```
-
-Make it your default toolchain.
-
-```sh
-rustup default nightly
-```
 
 ## Building
 
