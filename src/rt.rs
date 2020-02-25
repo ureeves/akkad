@@ -260,8 +260,7 @@ where
     }
 }
 
-/// An array type using [`generic_array::GenericArray`] and implementing
-/// [`arrayvec::Array`].
+/// An array type using [`GenericArray`] and implementing [`ArrayTrait`].
 ///
 /// Can be stored directly on the stack if needed.
 ///

@@ -24,7 +24,7 @@ impl<D: Digest> NodeId<D> {
     ///
     /// `static_prefix` and `dynamic_prefix` are parameters controlling the
     /// difficulty of their respective puzzle. They should be set to a number
-    /// between 0 and D::
+    /// between 0 and D::OutputSize.
     pub fn generate<B, RNG>(
         rng: &mut RNG,
         public_key: B,
@@ -242,8 +242,7 @@ impl From<RngError> for Error {
 
 #[test]
 fn generate_node_id() {
-    use rand::rngs::OsRng;
-    use secp256k1::Secp256k1;
+    use secp256k1::{rand::rngs::OsRng, Secp256k1};
     use sha2::Sha256;
 
     let secp = Secp256k1::new();
