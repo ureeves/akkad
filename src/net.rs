@@ -6,36 +6,38 @@
 //!
 //! ```
 //! use akkad::net::RpcGateway;
-//! use std::net::SocketAddr;
+//! use std::net::{UdpSocket, SocketAddr};
 //! use futures::executor::block_on;
+//!
+//! let req_bytes: [u8; 8] = [0, 0, 0, 104, 101, 108, 108, 111];
+//! let res_bytes: [u8; 8] = [1, 0, 0, 104, 101, 108, 108, 111];
 //!
 //! // startup two gateways
 //! let origin_addr = "127.0.0.1:13562".parse().unwrap();
-//! let gateway1 = RpcGateway::bind(origin_addr).expect("couldn't bind to address");
+//! let socket = UdpSocket::bind(origin_addr).unwrap();
 //!
 //! let dest_addr: SocketAddr = "127.0.0.2:26531".parse().unwrap();
-//! let gateway2 = RpcGateway::bind(dest_addr).expect("couldn't bind to address");
+//! let gateway = RpcGateway::bind(dest_addr).unwrap();
 //!
-//! // queue a response to be received by sending a request
-//! let response_fut = gateway1.send(b"hello", dest_addr);
-//! // queue a request to be received
-//! let request_fut = gateway2.recv();
+//! // send and receive a message
+//! let request_fut = gateway.recv();
+//! socket.send_to(&req_bytes[..], dest_addr).unwrap();
 //!
 //! // block on receiving a request
 //! let (msg, resp, addr) = block_on(request_fut).unwrap();
 //!
-//! assert_eq!(msg.as_ref(), b"hello");
+//! assert_eq!(msg.as_ref(), &res_bytes[3..]);
 //! assert_eq!(addr, origin_addr);
 //!
 //! // respond and block on being responded to
-//! resp.respond(b"hello").expect("couldn't say hello back");
-//! let (written, msg) = block_on(response_fut).unwrap();
+//! let mut buf = [0u8; 8];
+//! resp.respond(b"hello").unwrap();
+//! let (_, addr) = socket.recv_from(&mut buf).unwrap();
 //!
-//! assert_eq!(msg.as_ref(), b"hello");
-//! assert_eq!(written, b"hello".len());
+//! assert_eq!(addr, dest_addr);
+//! assert_eq!(&buf[..], &res_bytes[..]);
 //!
-//! gateway1.shutdown().unwrap();
-//! gateway2.shutdown().unwrap();
+//! gateway.shutdown().unwrap();
 //! ```
 //!
 //! # Design
@@ -335,59 +337,57 @@ fn loop_until_shutdown(
     }
 }
 
-/// Spawns a thread to process the incoming message.
+/// Processes the incoming message.
 fn process_buffer(
     state: Arc<ThreadSharedState>,
     sender: Sender<(Message, Responder, SocketAddr)>,
     msg: Message,
     addr: SocketAddr,
 ) {
-    thread::spawn(move || {
-        // drop malformed datagram
-        if msg.len < 4 {
+    // drop malformed datagram
+    if msg.len < 4 {
+        return;
+    }
+    match msg.vec[0] {
+        0x00 => {
+            let mut awaiting_requests = state.awaiting_requests.lock().unwrap();
+            let resp = Responder::new(
+                addr,
+                CycleId::from_bytes([msg.vec[1], msg.vec[2]]),
+                state.clone(),
+            );
+            // if there is a waiting request just set and wake (if has been polled)
+            // else just pump it through to the sender.
+            if let Some(rss) = awaiting_requests.pop() {
+                let mut rss = rss.lock().unwrap();
+                rss.result = Some(Ok((msg, resp, addr)));
+                if let Some(waker) = rss.waker.take() {
+                    waker.wake();
+                }
+            } else {
+                let _ = sender.send((msg, resp, addr));
+            }
+        }
+        0x01 => {
+            let mut awaiting_responses = state.awaiting_responses.lock().unwrap();
+            let cycle_id = CycleId::from_bytes([msg.vec[1], msg.vec[2]]);
+
+            // If there is a pending request set the response and wake,
+            // otherwise drop message.
+            if let Some(rss) = awaiting_responses.pop(&(addr, cycle_id)) {
+                let mut rss = rss.lock().unwrap();
+
+                rss.result = Some(Ok(msg));
+                if let Some(waker) = rss.waker.take() {
+                    waker.wake();
+                }
+            }
+        }
+        _ => {
+            // drop malformed datagram
             return;
         }
-        match msg.vec[0] {
-            0x00 => {
-                let mut awaiting_requests = state.awaiting_requests.lock().unwrap();
-                let resp = Responder::new(
-                    addr,
-                    CycleId::from_bytes([msg.vec[1], msg.vec[2]]),
-                    state.clone(),
-                );
-                // if there is a waiting request just set and wake (if has been polled)
-                // else just pump it through to the sender.
-                if let Some(rss) = awaiting_requests.pop() {
-                    let mut rss = rss.lock().unwrap();
-                    rss.result = Some(Ok((msg, resp, addr)));
-                    if let Some(waker) = rss.waker.take() {
-                        waker.wake();
-                    }
-                } else {
-                    let _ = sender.send((msg, resp, addr));
-                }
-            }
-            0x01 => {
-                let mut awaiting_responses = state.awaiting_responses.lock().unwrap();
-                let cycle_id = CycleId::from_bytes([msg.vec[1], msg.vec[2]]);
-
-                // If there is a pending request set the response and wake,
-                // otherwise drop message.
-                if let Some(rss) = awaiting_responses.pop(&(addr, cycle_id)) {
-                    let mut rss = rss.lock().unwrap();
-
-                    rss.result = Some(Ok(msg));
-                    if let Some(waker) = rss.waker.take() {
-                        waker.wake();
-                    }
-                }
-            }
-            _ => {
-                // drop malformed datagram
-                return;
-            }
-        }
-    });
+    }
 }
 
 /// Error type returned by the [`RpcGateway`] and associated types.

@@ -22,21 +22,19 @@
 //! assert_eq!(elem1.0[0], 1);
 //! assert_eq!(elem2.0[0], 2);
 //! ```
-use arrayvec::{Array as ArrayTrait, ArrayVec};
 use core::{cmp::Ordering, ops::Mul};
-use generic_array::{
-    typenum::{
-        consts::{U20, U8},
-        Prod, Unsigned,
-    },
-    ArrayLength, GenericArray,
+use generic_array::typenum::{
+    consts::{U20, U8},
+    Prod, Unsigned,
 };
+
+use crate::array::{Array, ArrayLength, ArrayVec};
 
 // TODO Tweak this parameter. In the paper they say 20. Is this a good value?
 type KParam = U20;
 
-type Key<N> = GenericArray<u8, N>;
-type KBucket<I, N> = ArrayVec<Array<(Key<N>, I), KParam>>;
+type Key<N> = Array<u8, N>;
+type KBucket<I, N> = ArrayVec<(Key<N>, I), KParam>;
 
 /// Routing table based on the XOR metric for a Kademlia DHT.
 pub struct RoutingTable<I, N>
@@ -44,9 +42,9 @@ where
     N: ArrayLength<u8> + Mul<U8>,
     Prod<N, U8>: ArrayLength<KBucket<I, N>>,
 {
-    key: GenericArray<u8, N>,
+    key: Key<N>,
     _info: I,
-    table: ArrayVec<Array<KBucket<I, N>, Prod<N, U8>>>,
+    table: ArrayVec<KBucket<I, N>, Prod<N, U8>>,
 }
 
 impl<I, N> RoutingTable<I, N>
@@ -71,8 +69,8 @@ where
             table.push(ArrayVec::new());
         }
 
-        let key = key.into();
         let _info = info;
+        let key = key.into();
         Self { key, _info, table }
     }
 
@@ -190,7 +188,7 @@ where
 {
     index: usize,
     len: usize,
-    arr: ArrayVec<Array<&'a (Key<N>, I), Prod<Prod<N, U8>, KParam>>>,
+    arr: ArrayVec<&'a (Key<N>, I), Prod<Prod<N, U8>, KParam>>,
 }
 
 impl<'a, I, N> ClosestIterator<'a, I, N>
@@ -219,7 +217,7 @@ where
 
     fn sort_by_distance(
         key: &Key<N>,
-        arr: &mut ArrayVec<Array<&'a (Key<N>, I), Prod<Prod<N, U8>, KParam>>>,
+        arr: &mut ArrayVec<&'a (Key<N>, I), Prod<Prod<N, U8>, KParam>>,
     ) {
         arr.sort_by(|lhs, rhs| {
             let lhs_key = &lhs.0;
@@ -257,30 +255,6 @@ where
         self.index += 1;
 
         Some(self.arr[index])
-    }
-}
-
-/// An array type using [`GenericArray`] and implementing [`ArrayTrait`].
-///
-/// Can be stored directly on the stack if needed.
-///
-/// This allows for an ArrayVec of any size to be constructed with any element
-/// type - including another ArrayVec. It's used for the [`RoutingTable`].
-pub struct Array<T, N: ArrayLength<T>>(GenericArray<T, N>);
-
-unsafe impl<T, N: ArrayLength<T>> ArrayTrait for Array<T, N> {
-    type Item = T;
-
-    type Index = usize;
-
-    const CAPACITY: usize = N::USIZE;
-
-    fn as_slice(&self) -> &[Self::Item] {
-        &self.0
-    }
-
-    fn as_mut_slice(&mut self) -> &mut [Self::Item] {
-        &mut self.0
     }
 }
 

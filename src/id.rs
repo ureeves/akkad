@@ -8,14 +8,12 @@
 //! No choice of hash algorithm is made - instead opting to keep it generic
 //! by using the [`Digest`] trait.
 
-use digest::{
-    generic_array::{ArrayLength, GenericArray},
-    Digest,
-};
+use crate::array;
+use digest::Digest;
 use rand::{Error as RngError, Rng};
 
 /// The identity of a node on the network.
-pub struct NodeId<D: Digest>(GenericArray<u8, D::OutputSize>);
+pub struct NodeId<D: Digest>(array::Array<u8, D::OutputSize>);
 
 impl<D: Digest> NodeId<D> {
     /// Generates a new node id and a nonce by performing the static (can
@@ -65,7 +63,7 @@ impl<D: Digest> NodeId<D> {
 
         // dynamic puzzle check
         let xor_arr = xor_arr(&node_id.0, &nonce.0);
-        let p = D::digest(&xor_arr);
+        let p = D::digest(&xor_arr).into();
         if prefix_zeros(&p) < dynamic_prefix {
             return Err(Error::InvalidNonce);
         }
@@ -96,13 +94,13 @@ impl<D: Digest> NodeId<D> {
         B: AsRef<[u8]>,
     {
         let digest = D::digest(public_key.as_ref());
-        let double_digest = D::digest(&digest);
+        let double_digest = D::digest(&digest).into();
 
         if prefix_zeros(&double_digest) < prefix {
             return Err(Error::InvalidKey);
         }
 
-        Ok(digest.into())
+        Ok(Self(digest.into()))
     }
 
     /// Produces a nonce from the created node id by solving the dynamic
@@ -117,7 +115,7 @@ impl<D: Digest> NodeId<D> {
         loop {
             randomize_arr(rng, &mut nonce)?;
             let xor_arr = xor_arr(&self.0, &nonce);
-            let p = D::digest(&xor_arr);
+            let p = D::digest(&xor_arr).into();
 
             if prefix < prefix_zeros(&p) {
                 break;
@@ -134,14 +132,14 @@ impl<D: Digest> AsRef<[u8]> for NodeId<D> {
     }
 }
 
-impl<D: Digest> From<GenericArray<u8, D::OutputSize>> for NodeId<D> {
-    fn from(arr: GenericArray<u8, D::OutputSize>) -> Self {
+impl<D: Digest> From<array::Array<u8, D::OutputSize>> for NodeId<D> {
+    fn from(arr: array::Array<u8, D::OutputSize>) -> Self {
         Self(arr)
     }
 }
 
-impl<D: Digest> From<&GenericArray<u8, D::OutputSize>> for NodeId<D> {
-    fn from(arr_ref: &GenericArray<u8, D::OutputSize>) -> Self {
+impl<D: Digest> From<&array::Array<u8, D::OutputSize>> for NodeId<D> {
+    fn from(arr_ref: &array::Array<u8, D::OutputSize>) -> Self {
         let mut arr = zeroed_arr();
         for i in 0..D::output_size() {
             arr[i] = arr_ref[i];
@@ -154,24 +152,23 @@ const ONES: [u8; 8] = [
     0b10000000, 0b01000000, 0b00100000, 0b00010000, 0b00001000, 0b00000100, 0b00000010, 0b00000001,
 ];
 
-fn zeroed_arr<L: ArrayLength<u8>>() -> GenericArray<u8, L> {
-    let zeroed_iter = ZeroedExactSizeIterator::new(L::to_usize());
-    GenericArray::from_exact_iter(zeroed_iter).unwrap()
+fn zeroed_arr<L: array::ArrayLength<u8>>() -> array::Array<u8, L> {
+    array::Array::default()
 }
 
-fn randomize_arr<L, RNG>(rng: &mut RNG, arr: &mut GenericArray<u8, L>) -> Result<()>
+fn randomize_arr<L, RNG>(rng: &mut RNG, arr: &mut array::Array<u8, L>) -> Result<()>
 where
-    L: ArrayLength<u8>,
+    L: array::ArrayLength<u8>,
     RNG: Rng,
 {
     rng.try_fill_bytes(&mut arr[..])?;
     Ok(())
 }
 
-fn xor_arr<L: ArrayLength<u8>>(
-    lhs: &GenericArray<u8, L>,
-    rhs: &GenericArray<u8, L>,
-) -> GenericArray<u8, L> {
+fn xor_arr<L: array::ArrayLength<u8>>(
+    lhs: &array::Array<u8, L>,
+    rhs: &array::Array<u8, L>,
+) -> array::Array<u8, L> {
     let mut arr = zeroed_arr();
     for i in 0..L::to_usize() {
         arr[i] = lhs[i] ^ rhs[i];
@@ -179,7 +176,7 @@ fn xor_arr<L: ArrayLength<u8>>(
     arr
 }
 
-fn prefix_zeros<L: ArrayLength<u8>>(arr: &GenericArray<u8, L>) -> usize {
+fn prefix_zeros<L: array::ArrayLength<u8>>(arr: &array::Array<u8, L>) -> usize {
     let mut prefix = 0;
     'outer: for byte in &arr[..] {
         for one in &ONES[..] {
@@ -190,33 +187,6 @@ fn prefix_zeros<L: ArrayLength<u8>>(arr: &GenericArray<u8, L>) -> usize {
         }
     }
     prefix
-}
-
-struct ZeroedExactSizeIterator {
-    index: usize,
-    len: usize,
-}
-
-impl ZeroedExactSizeIterator {
-    fn new(len: usize) -> Self {
-        Self { index: 0, len: len }
-    }
-}
-
-impl ExactSizeIterator for ZeroedExactSizeIterator {
-    fn len(&self) -> usize {
-        self.len
-    }
-}
-
-impl Iterator for ZeroedExactSizeIterator {
-    type Item = u8;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index == self.len {
-            return None;
-        }
-        Some(0)
-    }
 }
 
 type Result<T> = std::result::Result<T, Error>;
