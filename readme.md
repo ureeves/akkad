@@ -1,7 +1,6 @@
 # Akkad
 
 ![CI](https://github.com/ureeves/akkad/workflows/CI/badge.svg?branch=master)
-
 [![codecov](https://codecov.io/gh/ureeves/akkad/branch/master/graph/badge.svg)](https://codecov.io/gh/ureeves/akkad)
 
 An experimental implementation of a Kademlia node.
