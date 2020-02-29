@@ -115,8 +115,8 @@ impl RpcGateway {
         });
 
         Ok(Self {
-            handle: handle,
-            shared_state: shared_state,
+            handle,
+            shared_state,
         })
     }
 
