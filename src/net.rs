@@ -263,7 +263,7 @@ impl ThreadSharedState {
         Self {
             shutdown: RwLock::new(false),
             error: RwLock::new(None),
-            socket: socket,
+            socket,
             receiver: Mutex::new(recv),
             cycle_id: Mutex::new(CycleId::new()),
             awaiting_responses: Mutex::new(AwaitingResponseMap::new()),
@@ -385,7 +385,6 @@ fn process_buffer(
         }
         _ => {
             // drop malformed datagram
-            return;
         }
     }
 }
@@ -608,7 +607,7 @@ impl ResponseSharedState {
     /// New response state with `bytes_consumed` from the buffer.
     fn new(bytes_consumed: usize) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
-            bytes_consumed: bytes_consumed,
+            bytes_consumed,
             result: None,
             waker: None,
             created: Instant::now(),

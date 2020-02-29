@@ -148,9 +148,7 @@ impl<D: Digest> From<&array::Array<u8, D::OutputSize>> for NodeId<D> {
     }
 }
 
-const ONES: [u8; 8] = [
-    0b10000000, 0b01000000, 0b00100000, 0b00010000, 0b00001000, 0b00000100, 0b00000010, 0b00000001,
-];
+const ONES: [u8; 8] = [0x80, 0x40, 0x20, 0x10, 0x8, 0x4, 0x2, 0x1];
 
 fn zeroed_arr<L: array::ArrayLength<u8>>() -> array::Array<u8, L> {
     array::Array::default()
