@@ -8,12 +8,12 @@
 //! No choice of hash algorithm is made - instead opting to keep it generic
 //! by using the [`Digest`] trait.
 
-use crate::array;
+use crate::array::{Array, ArrayLength};
 use digest::Digest;
 use rand::{Error as RngError, Rng};
 
 /// The identity of a node on the network.
-pub struct NodeId<D: Digest>(array::Array<u8, D::OutputSize>);
+pub struct NodeId<D: Digest>(Array<u8, D::OutputSize>);
 
 impl<D: Digest> NodeId<D> {
     /// Generates a new node id and a nonce by performing the static (can
@@ -57,7 +57,7 @@ impl<D: Digest> NodeId<D> {
         let nonce = Self::parse_unchecked(nonce.as_ref()).ok_or(Error::InvalidNonce)?;
 
         // static puzzle check
-        if &node_id.0 != &Self::static_puzzle(public_key, static_prefix)?.0 {
+        if node_id.0 != Self::static_puzzle(public_key, static_prefix)?.0 {
             return Err(Error::InvalidKey);
         }
 
@@ -132,14 +132,14 @@ impl<D: Digest> AsRef<[u8]> for NodeId<D> {
     }
 }
 
-impl<D: Digest> From<array::Array<u8, D::OutputSize>> for NodeId<D> {
-    fn from(arr: array::Array<u8, D::OutputSize>) -> Self {
+impl<D: Digest> From<Array<u8, D::OutputSize>> for NodeId<D> {
+    fn from(arr: Array<u8, D::OutputSize>) -> Self {
         Self(arr)
     }
 }
 
-impl<D: Digest> From<&array::Array<u8, D::OutputSize>> for NodeId<D> {
-    fn from(arr_ref: &array::Array<u8, D::OutputSize>) -> Self {
+impl<D: Digest> From<&Array<u8, D::OutputSize>> for NodeId<D> {
+    fn from(arr_ref: &Array<u8, D::OutputSize>) -> Self {
         let mut arr = zeroed_arr();
         for i in 0..D::output_size() {
             arr[i] = arr_ref[i];
@@ -150,23 +150,20 @@ impl<D: Digest> From<&array::Array<u8, D::OutputSize>> for NodeId<D> {
 
 const ONES: [u8; 8] = [0x80, 0x40, 0x20, 0x10, 0x8, 0x4, 0x2, 0x1];
 
-fn zeroed_arr<L: array::ArrayLength<u8>>() -> array::Array<u8, L> {
-    array::Array::default()
+fn zeroed_arr<L: ArrayLength<u8>>() -> Array<u8, L> {
+    Array::default()
 }
 
-fn randomize_arr<L, RNG>(rng: &mut RNG, arr: &mut array::Array<u8, L>) -> Result<()>
+fn randomize_arr<L, RNG>(rng: &mut RNG, arr: &mut Array<u8, L>) -> Result<()>
 where
-    L: array::ArrayLength<u8>,
+    L: ArrayLength<u8>,
     RNG: Rng,
 {
     rng.try_fill_bytes(&mut arr[..])?;
     Ok(())
 }
 
-fn xor_arr<L: array::ArrayLength<u8>>(
-    lhs: &array::Array<u8, L>,
-    rhs: &array::Array<u8, L>,
-) -> array::Array<u8, L> {
+fn xor_arr<L: ArrayLength<u8>>(lhs: &Array<u8, L>, rhs: &Array<u8, L>) -> Array<u8, L> {
     let mut arr = zeroed_arr();
     for i in 0..L::to_usize() {
         arr[i] = lhs[i] ^ rhs[i];
@@ -174,7 +171,7 @@ fn xor_arr<L: array::ArrayLength<u8>>(
     arr
 }
 
-fn prefix_zeros<L: array::ArrayLength<u8>>(arr: &array::Array<u8, L>) -> usize {
+fn prefix_zeros<L: ArrayLength<u8>>(arr: &Array<u8, L>) -> usize {
     let mut prefix = 0;
     'outer: for byte in &arr[..] {
         for one in &ONES[..] {

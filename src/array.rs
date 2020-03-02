@@ -1,7 +1,8 @@
 //! Array-like types on the stack.
 pub use arrayvec::{CapacityError, Drain, IntoIter as ArrayVecIter};
-pub use generic_array::{ArrayLength, GenericArrayIter as ArrayIter};
+pub use generic_array::{typenum::consts, ArrayLength, GenericArrayIter as ArrayIter};
 
+use generic_array::GenericArray;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use core::{
@@ -40,9 +41,9 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// Capacity is inferred from the type parameter.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U16};
     ///
-    /// let mut array = ArrayVec::<[_; 16]>::new();
+    /// let mut array = ArrayVec::<_, U16>::new();
     /// array.push(1);
     /// array.push(2);
     /// assert_eq!(&array[..], &[1, 2]);
@@ -57,7 +58,7 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// Return the number of elements in the `ArrayVec`.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::ArrayVec;
     ///
     /// let mut array = ArrayVec::from([1, 2, 3]);
     /// array.pop();
@@ -68,10 +69,23 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
         self.inner.len()
     }
 
+    /// Return true if the vector is empty.
+    ///
+    /// ```
+    /// use akkad::array::ArrayVec;
+    ///
+    /// let array = ArrayVec::from([1, 2, 3]);
+    /// assert!(!array.is_empty());
+    /// ```
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// Return the capacity of the `ArrayVec`.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::ArrayVec;
     ///
     /// let array = ArrayVec::from([1, 2, 3]);
     /// assert_eq!(array.capacity(), 3);
@@ -84,9 +98,9 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// Return if the `ArrayVec` is completely filled.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U1};
     ///
-    /// let mut array = ArrayVec::<[_; 1]>::new();
+    /// let mut array = ArrayVec::<_, U1>::new();
     /// assert!(!array.is_full());
     /// array.push(1);
     /// assert!(array.is_full());
@@ -98,7 +112,7 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// Returns the capacity left in the `ArrayVec`.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::ArrayVec;
     ///
     /// let mut array = ArrayVec::from([1, 2, 3]);
     /// array.pop();
@@ -113,9 +127,9 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// ***Panics*** if the vector is already full.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U2};
     ///
-    /// let mut array = ArrayVec::<[_; 2]>::new();
+    /// let mut array = ArrayVec::<_, U2>::new();
     ///
     /// array.push(1);
     /// array.push(2);
@@ -132,9 +146,9 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// is already full.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U2};
     ///
-    /// let mut array = ArrayVec::<[_; 2]>::new();
+    /// let mut array = ArrayVec::<_, U2>::new();
     ///
     /// let push1 = array.try_push(1);
     /// let push2 = array.try_push(2);
@@ -154,15 +168,17 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
 
     /// Push `element` to the end of the vector without checking the capacity.
     ///
+    /// # Safety
+    ///
     /// It is up to the caller to ensure the capacity of the vector is
     /// sufficiently large.
     ///
     /// This method uses *debug assertions* to check that the arrayvec is not full.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U2};
     ///
-    /// let mut array = ArrayVec::<[_; 2]>::new();
+    /// let mut array = ArrayVec::<_, U2>::new();
     ///
     /// if array.len() + 2 <= array.capacity() {
     ///     unsafe {
@@ -188,9 +204,9 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// `try_insert` for fallible version.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U2};
     ///
-    /// let mut array = ArrayVec::<[_; 2]>::new();
+    /// let mut array = ArrayVec::<_, U2>::new();
     ///
     /// array.insert(0, "x");
     /// array.insert(0, "y");
@@ -211,9 +227,9 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// ***Panics*** `index` is out of bounds.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U2};
     ///
-    /// let mut array = ArrayVec::<[_; 2]>::new();
+    /// let mut array = ArrayVec::<_, U2>::new();
     ///
     /// assert!(array.try_insert(0, "x").is_ok());
     /// assert!(array.try_insert(0, "y").is_ok());
@@ -229,9 +245,9 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// Return `Some(` *element* `)` if the vector is non-empty, else `None`.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U2};
     ///
-    /// let mut array = ArrayVec::<[_; 2]>::new();
+    /// let mut array = ArrayVec::<_, U2>::new();
     ///
     /// array.push(1);
     ///
@@ -251,7 +267,7 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// ***Panics*** if the `index` is out of bounds.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::ArrayVec;
     ///
     /// let mut array = ArrayVec::from([1, 2, 3]);
     ///
@@ -273,7 +289,7 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// Return `Some(` *element* `)` if the index is in bounds, else `None`.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::ArrayVec;
     ///
     /// let mut array = ArrayVec::from([1, 2, 3]);
     ///
@@ -293,7 +309,7 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// ***Panics*** if the `index` is out of bounds.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::ArrayVec;
     ///
     /// let mut array = ArrayVec::from([1, 2, 3]);
     ///
@@ -311,7 +327,7 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// is no element at `index`. Otherwise, return the element inside `Some`.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::ArrayVec;
     ///
     /// let mut array = ArrayVec::from([1, 2, 3]);
     ///
@@ -332,7 +348,7 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// effect.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::ArrayVec;
     ///
     /// let mut array = ArrayVec::from([1, 2, 3, 4, 5]);
     /// array.truncate(3);
@@ -356,7 +372,7 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// elements.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::ArrayVec;
     ///
     /// let mut array = ArrayVec::from([1, 2, 3, 4]);
     /// array.retain(|x| *x & 1 != 0 );
@@ -371,6 +387,8 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
 
     /// Set the vector’s length without dropping or moving out elements
     ///
+    /// # Safety
+    ///
     /// This method is `unsafe` because it changes the notion of the
     /// number of “valid” elements in the vector. Use with care.
     ///
@@ -383,9 +401,9 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// Copy and appends all elements in a slice to the `ArrayVec`.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U10};
     ///
-    /// let mut vec: ArrayVec<[usize; 10]> = ArrayVec::new();
+    /// let mut vec: ArrayVec<usize, U10> = ArrayVec::new();
     /// vec.push(1);
     /// vec.try_extend_from_slice(&[2, 3]).unwrap();
     /// assert_eq!(&vec[..], &[1, 2, 3]);
@@ -416,10 +434,10 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     /// the end point is greater than the length of the vector.
     ///
     /// ```
-    /// use arrayvec::ArrayVec;
+    /// use akkad::array::{ArrayVec, consts::U3};
     ///
     /// let mut v = ArrayVec::from([1, 2, 3]);
-    /// let u: ArrayVec<[_; 3]> = v.drain(0..2).collect();
+    /// let u: ArrayVec<_, U3> = v.drain(0..2).collect();
     /// assert_eq!(&v[..], &[3]);
     /// assert_eq!(&u[..], &[1, 2]);
     /// ```
@@ -427,7 +445,7 @@ impl<T, N: ArrayLength<T>> ArrayVec<T, N> {
     where
         R: RangeBounds<usize>,
     {
-        self.inner.drain(range).into()
+        self.inner.drain(range)
     }
 
     /// Return the inner fixed size array, if it is full to its capacity.
@@ -476,10 +494,10 @@ impl<T, N: ArrayLength<T>> AsMut<[T]> for ArrayVec<T, N> {
     }
 }
 
-impl<T, N: ArrayLength<T>> From<Array<T, N>> for ArrayVec<T, N> {
-    fn from(inner: Array<T, N>) -> Self {
+impl<T, N: ArrayLength<T>, Arr: Into<Array<T, N>>> From<Arr> for ArrayVec<T, N> {
+    fn from(inner: Arr) -> Self {
         Self {
-            inner: inner.into(),
+            inner: inner.into().into(),
         }
     }
 }
@@ -656,10 +674,10 @@ where
 
 /// An array type of generic size. All elements of the array are initialized.
 pub struct Array<T, N: ArrayLength<T>> {
-    inner: generic_array::GenericArray<T, N>,
+    inner: GenericArray<T, N>,
 }
 
-impl<T, N: ArrayLength<T>, Arr: Into<generic_array::GenericArray<T, N>>> From<Arr> for Array<T, N> {
+impl<T, N: ArrayLength<T>, Arr: Into<GenericArray<T, N>>> From<Arr> for Array<T, N> {
     fn from(arr: Arr) -> Self {
         Self { inner: arr.into() }
     }
@@ -809,26 +827,26 @@ where
 impl<T, N: ArrayLength<T>> FromIterator<T> for Array<T, N> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         Self {
-            inner: generic_array::GenericArray::from_iter(iter),
+            inner: GenericArray::from_iter(iter),
         }
     }
 }
 
 impl<T, N: ArrayLength<T>> Borrow<[T]> for Array<T, N> {
     fn borrow(&self) -> &[T] {
-        generic_array::GenericArray::borrow(&self.inner)
+        GenericArray::borrow(&self.inner)
     }
 }
 
 impl<T, N: ArrayLength<T>> BorrowMut<[T]> for Array<T, N> {
     fn borrow_mut(&mut self) -> &mut [T] {
-        generic_array::GenericArray::borrow_mut(&mut self.inner)
+        GenericArray::borrow_mut(&mut self.inner)
     }
 }
 
 impl<N: ArrayLength<u8>> Write for Array<u8, N>
 where
-    generic_array::GenericArray<u8, N>: Write,
+    GenericArray<u8, N>: Write,
 {
     fn write_str(&mut self, string: &str) -> Result<(), fmt::Error> {
         Write::write_str(&mut self.inner, string)
@@ -846,14 +864,14 @@ impl<T: Serialize, N: ArrayLength<T>> Serialize for Array<T, N> {
 
 impl<'de, T: Deserialize<'de>, N: ArrayLength<T>> Deserialize<'de> for Array<T, N>
 where
-    generic_array::GenericArray<T, N>: Deserialize<'de>,
+    GenericArray<T, N>: Deserialize<'de>,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         Ok(Self {
-            inner: generic_array::GenericArray::deserialize(deserializer)?,
+            inner: GenericArray::deserialize(deserializer)?,
         })
     }
 }

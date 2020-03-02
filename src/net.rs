@@ -144,9 +144,8 @@ impl RpcGateway {
         };
 
         // If there is already a queued message handle it immediately
-        match self.shared_state.receiver.lock().unwrap().try_recv() {
-            Ok((msg, resp, addr)) => return RequestFuture::already_concluded(msg, resp, addr),
-            _ => {}
+        if let Ok((msg, resp, addr)) = self.shared_state.receiver.lock().unwrap().try_recv() {
+            return RequestFuture::already_concluded(msg, resp, addr);
         }
 
         // Otherwise push it to the queue
@@ -288,7 +287,7 @@ fn loop_until_shutdown(
 
         // Every `response_timeout` see if some responses are taking more
         // than `response_timeout` secs, and eject them from the map, setting Error::Timeout.
-        let response_timeout = state.response_timeout.read().unwrap().clone();
+        let response_timeout = *state.response_timeout.read().unwrap();
         if past.elapsed() > response_timeout {
             let mut rss_vec = Vec::new();
             let mut awaiting_responses = state.awaiting_responses.lock().unwrap();
@@ -296,7 +295,7 @@ fn loop_until_shutdown(
             for (key, rss) in awaiting_responses.iter() {
                 let rss_guard = rss.lock().unwrap();
                 if rss_guard.created.elapsed() > response_timeout {
-                    rss_vec.push((key.clone(), rss.clone()))
+                    rss_vec.push((*key, rss.clone()))
                 }
             }
 
@@ -649,7 +648,7 @@ impl Message {
         let mut this = Self::empty();
 
         this.vec[0] = 0x00;
-        this.vec[1..3].copy_from_slice(&cycle_id.to_bytes());
+        this.vec[1..3].copy_from_slice(&cycle_id.into_bytes());
 
         let to_copy = cmp::min(MAX_DATAGRAM_LEN - 3, buf.len());
         this.vec[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
@@ -663,7 +662,7 @@ impl Message {
         let mut this = Self::empty();
 
         this.vec[0] = 0x01;
-        this.vec[1..3].copy_from_slice(&cycle_id.to_bytes());
+        this.vec[1..3].copy_from_slice(&cycle_id.into_bytes());
 
         let to_copy = cmp::min(MAX_DATAGRAM_LEN - 3, buf.len());
         this.vec[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
@@ -696,7 +695,7 @@ impl CycleId {
         Self(u16::from_be_bytes(bytes))
     }
 
-    fn to_bytes(&self) -> [u8; 2] {
+    fn into_bytes(self) -> [u8; 2] {
         u16::to_be_bytes(self.0)
     }
 }

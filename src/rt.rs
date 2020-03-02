@@ -23,12 +23,12 @@
 //! assert_eq!(elem2.0[0], 2);
 //! ```
 use core::{cmp::Ordering, ops::Mul};
-use generic_array::typenum::{
-    consts::{U20, U8},
-    Prod, Unsigned,
-};
+use generic_array::typenum::{Prod, Unsigned};
 
-use crate::array::{Array, ArrayLength, ArrayVec};
+use crate::array::{
+    consts::{U20, U8},
+    Array, ArrayLength, ArrayVec,
+};
 
 // TODO Tweak this parameter. In the paper they say 20. Is this a good value?
 type KParam = U20;
@@ -36,22 +36,25 @@ type KParam = U20;
 type Key<N> = Array<u8, N>;
 type KBucket<I, N> = ArrayVec<(Key<N>, I), KParam>;
 
+type N8<N> = Prod<N, U8>;
+type KN8<N> = Prod<N8<N>, KParam>;
+
 /// Routing table based on the XOR metric for a Kademlia DHT.
 pub struct RoutingTable<I, N>
 where
     N: ArrayLength<u8> + Mul<U8>,
-    Prod<N, U8>: ArrayLength<KBucket<I, N>>,
+    N8<N>: ArrayLength<KBucket<I, N>>,
 {
     key: Key<N>,
     _info: I,
-    table: ArrayVec<KBucket<I, N>, Prod<N, U8>>,
+    table: ArrayVec<KBucket<I, N>, N8<N>>,
 }
 
 impl<I, N> RoutingTable<I, N>
 where
     N: ArrayLength<u8> + Mul<U8>,
-    Prod<N, U8>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
-    for<'a> Prod<Prod<N, U8>, KParam>: ArrayLength<&'a (Key<N>, I)>,
+    N8<N>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
+    for<'a> KN8<N>: ArrayLength<&'a (Key<N>, I)>,
 {
     /// Creates a new empty routing table with key and info belonging to the
     /// local node.
@@ -65,12 +68,11 @@ where
     /// ```
     pub fn new(key: Key<N>, info: I) -> Self {
         let mut table = ArrayVec::new();
-        for _ in 0..<Prod<N, U8>>::USIZE {
+        for _ in 0..<N8<N>>::USIZE {
             table.push(ArrayVec::new());
         }
 
         let _info = info;
-        let key = key.into();
         Self { key, _info, table }
     }
 
@@ -90,7 +92,6 @@ where
     /// rt.update(key.into(), ());
     /// ```
     pub fn update(&mut self, key: Key<N>, info: I) -> Option<(Key<N>, I)> {
-        let key = key.into();
         let bucket_index = rt_kbucket_index(&self.key, &key);
 
         // if table has key eject information and push new to the front of the
@@ -183,25 +184,25 @@ where
 struct ClosestIterator<'a, I, N>
 where
     N: ArrayLength<u8> + Mul<U8>,
-    Prod<N, U8>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
-    Prod<Prod<N, U8>, KParam>: ArrayLength<&'a (Key<N>, I)>,
+    N8<N>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
+    KN8<N>: ArrayLength<&'a (Key<N>, I)>,
 {
     index: usize,
     len: usize,
-    arr: ArrayVec<&'a (Key<N>, I), Prod<Prod<N, U8>, KParam>>,
+    arr: ArrayVec<&'a (Key<N>, I), KN8<N>>,
 }
 
 impl<'a, I, N> ClosestIterator<'a, I, N>
 where
     N: ArrayLength<u8> + Mul<U8>,
-    Prod<N, U8>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
-    Prod<Prod<N, U8>, KParam>: ArrayLength<&'a (Key<N>, I)>,
+    N8<N>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
+    KN8<N>: ArrayLength<&'a (Key<N>, I)>,
 {
     fn new(key: &Key<N>, rt: &'a RoutingTable<I, N>) -> Self {
         let mut len = 0;
         let mut arr = ArrayVec::new();
 
-        for index in 0..<Prod<N, U8>>::USIZE {
+        for index in 0..<N8<N>>::USIZE {
             let filled = rt.table[index].len();
             for elem in &rt.table[index] {
                 arr.push(elem);
@@ -215,10 +216,7 @@ where
         Self { index, len, arr }
     }
 
-    fn sort_by_distance(
-        key: &Key<N>,
-        arr: &mut ArrayVec<&'a (Key<N>, I), Prod<Prod<N, U8>, KParam>>,
-    ) {
+    fn sort_by_distance(key: &Key<N>, arr: &mut ArrayVec<&'a (Key<N>, I), KN8<N>>) {
         arr.sort_by(|lhs, rhs| {
             let lhs_key = &lhs.0;
             let rhs_key = &rhs.0;
@@ -229,7 +227,7 @@ where
                 if lhs_xor < rhs_xor {
                     return Ordering::Less;
                 }
-                if rhs_xor > rhs_xor {
+                if lhs_xor > rhs_xor {
                     return Ordering::Greater;
                 }
             }
@@ -241,8 +239,8 @@ where
 impl<'a, I, N> Iterator for ClosestIterator<'a, I, N>
 where
     N: ArrayLength<u8> + Mul<U8>,
-    Prod<N, U8>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
-    Prod<Prod<N, U8>, KParam>: ArrayLength<&'a (Key<N>, I)>,
+    N8<N>: ArrayLength<KBucket<I, N>> + Mul<KParam>,
+    KN8<N>: ArrayLength<&'a (Key<N>, I)>,
 {
     type Item = &'a (Key<N>, I);
 
@@ -259,9 +257,7 @@ where
 }
 
 #[cfg(test)]
-const ZEROS: [u8; 8] = [
-    0b10000000, 0b01000000, 0b00100000, 0b00010000, 0b00001000, 0b00000100, 0b00000010, 0b00000001,
-];
+const ONES: [u8; 8] = [0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01];
 
 #[test]
 fn kbucket_fills_up_nicely() {
@@ -314,8 +310,8 @@ fn computed_key_index_correct() {
 
     let mut leading = 0;
     for i in 0..N {
-        for j in 0..8 {
-            key[i] = ZEROS[j];
+        for one in &ONES {
+            key[i] = *one;
             assert_eq!(
                 rt_kbucket_index(&key.clone().into(), &zero_key.clone().into()),
                 leading
@@ -334,7 +330,7 @@ fn closest_iterator_ordering() {
     const N: usize = 1;
 
     let host_key = [0u8; 1];
-    let mut key = host_key.clone();
+    let mut key = host_key;
     let mut rt = RoutingTable::new(host_key.into(), ());
 
     rt.update([0].into(), ());
