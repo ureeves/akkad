@@ -13,10 +13,10 @@
 //! let res_bytes: [u8; 8] = [1, 0, 0, 104, 101, 108, 108, 111];
 //!
 //! // startup two gateways
-//! let origin_addr = "127.0.0.1:13565".parse().unwrap();
+//! let origin_addr = "127.0.0.1:25555".parse().unwrap();
 //! let socket = UdpSocket::bind(origin_addr).unwrap();
 //!
-//! let dest_addr: SocketAddr = "127.0.0.1:26535".parse().unwrap();
+//! let dest_addr: SocketAddr = "127.0.0.1:25556".parse().unwrap();
 //! let gateway = block_on(RpcGateway::bind(dest_addr)).unwrap();
 //!
 //! // send and receive a message
@@ -529,9 +529,9 @@ impl From<oneshot::Canceled> for Error {
 fn clean_shutdown() {
     use futures::executor::block_on;
 
-    let gateway = block_on(RpcGateway::bind("127.0.0.1:33333")).expect("couldn't bind to address");
+    let gateway = block_on(RpcGateway::bind("127.0.0.1:25557")).expect("couldn't bind to address");
 
-    let res_fut = gateway.send(b"hello", "127.0.0.1:33333");
+    let res_fut = gateway.send(b"hello", "127.0.0.1:25557");
     let req_fut = gateway.recv();
 
     block_on(gateway.shutdown()).expect("not a clean shutdown");
@@ -568,10 +568,10 @@ fn multiple_receptions() {
         0b0110_1111,
     ];
 
-    let dest_addr: SocketAddr = "127.0.0.1:22223".parse().unwrap();
+    let dest_addr: SocketAddr = "127.0.0.1:25558".parse().unwrap();
     let gateway = block_on(RpcGateway::bind(dest_addr)).expect("couldn't bind to address");
 
-    let origin_addr: SocketAddr = "127.0.0.1:11112".parse().unwrap();
+    let origin_addr: SocketAddr = "127.0.0.1:25559".parse().unwrap();
     let udp_socket = UdpSocket::bind(origin_addr).expect("couldn't bind to address");
 
     udp_socket
@@ -637,10 +637,10 @@ fn multiple_sends() {
     use std::net::UdpSocket;
     use std::thread;
 
-    let origin_addr: SocketAddr = "127.0.0.1:22224".parse().unwrap();
+    let origin_addr: SocketAddr = "127.0.0.1:25560".parse().unwrap();
     let gateway = block_on(RpcGateway::bind(origin_addr)).expect("couldn't bind to address");
 
-    let dest_addr: SocketAddr = "127.0.0.1:11113".parse().unwrap();
+    let dest_addr: SocketAddr = "127.0.0.1:25561".parse().unwrap();
     let udp_socket = Arc::new(UdpSocket::bind(dest_addr).expect("couldn't bind to address"));
 
     let clone_udpsocket = udp_socket.clone();
