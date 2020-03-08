@@ -10,7 +10,7 @@
 //! use futures::executor::block_on;
 //!
 //! let req_bytes: [u8; 8] = [0, 0, 0, 104, 101, 108, 108, 111];
-//! let res_bytes: [u8; 8] = [1, 0, 0, 104, 101, 108, 108, 111];
+//! let res_bytes: [u8; 8] = [0x80, 0, 0, 104, 101, 108, 108, 111];
 //!
 //! // startup two gateways
 //! let origin_addr = "127.0.0.1:25555".parse().unwrap();
