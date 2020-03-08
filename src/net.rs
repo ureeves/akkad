@@ -466,7 +466,7 @@ impl Message {
     fn res(cycle_id: u16, buf: &[u8]) -> Self {
         let mut msg = Self::zeroed();
 
-        msg.vec[0] = 0x01;
+        msg.vec[0] = 0x80;
         msg.vec[1..3].copy_from_slice(&u16::to_be_bytes(cycle_id));
 
         let to_copy = cmp::min(MAX_DATAGRAM_LEN - 3, buf.len());
