@@ -16,7 +16,7 @@
 //! let origin_addr = "127.0.0.1:13565".parse().unwrap();
 //! let socket = UdpSocket::bind(origin_addr).unwrap();
 //!
-//! let dest_addr: SocketAddr = "127.0.0.2:26535".parse().unwrap();
+//! let dest_addr: SocketAddr = "127.0.0.1:26535".parse().unwrap();
 //! let gateway = block_on(RpcGateway::bind(dest_addr)).unwrap();
 //!
 //! // send and receive a message
@@ -531,7 +531,7 @@ fn clean_shutdown() {
 
     let gateway = block_on(RpcGateway::bind("127.0.0.1:33333")).expect("couldn't bind to address");
 
-    let res_fut = gateway.send(b"hello", "127.0.0.2:33333");
+    let res_fut = gateway.send(b"hello", "127.0.0.1:33333");
     let req_fut = gateway.recv();
 
     block_on(gateway.shutdown()).expect("not a clean shutdown");
@@ -568,7 +568,7 @@ fn multiple_receptions() {
         0b0110_1111,
     ];
 
-    let dest_addr: SocketAddr = "127.0.0.2:22223".parse().unwrap();
+    let dest_addr: SocketAddr = "127.0.0.1:22223".parse().unwrap();
     let gateway = block_on(RpcGateway::bind(dest_addr)).expect("couldn't bind to address");
 
     let origin_addr: SocketAddr = "127.0.0.1:11112".parse().unwrap();
@@ -637,7 +637,7 @@ fn multiple_sends() {
     use std::net::UdpSocket;
     use std::thread;
 
-    let origin_addr: SocketAddr = "127.0.0.2:22224".parse().unwrap();
+    let origin_addr: SocketAddr = "127.0.0.1:22224".parse().unwrap();
     let gateway = block_on(RpcGateway::bind(origin_addr)).expect("couldn't bind to address");
 
     let dest_addr: SocketAddr = "127.0.0.1:11113".parse().unwrap();
