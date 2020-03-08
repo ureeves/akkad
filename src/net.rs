@@ -158,17 +158,7 @@ impl RpcGateway {
 
     /// Sends a request to the given address. Returns a future yielding the
     /// number of bytes written on the socket and a response.
-    pub async fn send<A: ToSocketAddrs>(&self, buf: &[u8], addr: A) -> Result<(usize, Message)> {
-        // get socket address from addr
-        let mut addrs = addr.to_socket_addrs().await?;
-        let addr = addrs.next();
-
-        if addr.is_none() {
-            let err = io::Error::from(io::ErrorKind::InvalidInput);
-            return Err(err.into());
-        }
-
-        let addr = addr.unwrap();
+    pub async fn send(&self, buf: &[u8], addr: SocketAddr) -> Result<(usize, Message)> {
         let msg = Message::req(0, buf);
 
         let (sender, receiver) = oneshot::channel();
@@ -529,9 +519,10 @@ impl From<oneshot::Canceled> for Error {
 fn clean_shutdown() {
     use futures::executor::block_on;
 
-    let gateway = block_on(RpcGateway::bind("127.0.0.1:25557")).expect("couldn't bind to address");
+    let addr: SocketAddr = "127.0.0.1:25557".parse().unwrap();
+    let gateway = block_on(RpcGateway::bind(addr)).expect("couldn't bind to address");
 
-    let res_fut = gateway.send(b"hello", "127.0.0.1:25557");
+    let res_fut = gateway.send(b"hello", addr);
     let req_fut = gateway.recv();
 
     block_on(gateway.shutdown()).expect("not a clean shutdown");
