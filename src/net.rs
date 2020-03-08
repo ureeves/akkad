@@ -13,11 +13,11 @@
 //! let res_bytes: [u8; 8] = [1, 0, 0, 104, 101, 108, 108, 111];
 //!
 //! // startup two gateways
-//! let origin_addr = "127.0.0.1:13562".parse().unwrap();
+//! let origin_addr = "127.0.0.1:13565".parse().unwrap();
 //! let socket = UdpSocket::bind(origin_addr).unwrap();
 //!
-//! let dest_addr: SocketAddr = "127.0.0.2:26531".parse().unwrap();
-//! let gateway = RpcGateway::bind(dest_addr).unwrap();
+//! let dest_addr: SocketAddr = "127.0.0.2:26535".parse().unwrap();
+//! let gateway = block_on(RpcGateway::bind(dest_addr)).unwrap();
 //!
 //! // send and receive a message
 //! let request_fut = gateway.recv();
@@ -31,13 +31,13 @@
 //!
 //! // respond and block on being responded to
 //! let mut buf = [0u8; 8];
-//! resp.respond(b"hello").unwrap();
+//! block_on(resp.respond(b"hello")).unwrap();
 //! let (_, addr) = socket.recv_from(&mut buf).unwrap();
 //!
 //! assert_eq!(addr, dest_addr);
 //! assert_eq!(&buf[..], &res_bytes[..]);
 //!
-//! gateway.shutdown().unwrap();
+//! block_on(gateway.shutdown()).unwrap();
 //! ```
 //!
 //! # Design
@@ -64,33 +64,51 @@
 //!
 //! The gateway will - internally - continuously processes arriving messages,
 //! and forwards them sequencially to the returned [`Future`]s.
-use std::{
-    any::Any,
-    cmp,
-    collections::HashMap,
-    fmt,
-    future::Future,
+use async_std::{
     io,
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
-    pin::Pin,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Arc, Mutex, RwLock,
-    },
-    task::{Context, Poll, Waker},
-    thread,
-    time::{Duration, Instant},
+    prelude::*,
+    sync::{Arc, Mutex},
+    task,
 };
+use futures::{
+    channel::{mpsc, oneshot},
+    select,
+    sink::SinkExt,
+    FutureExt,
+};
+use std::{cmp, collections::HashMap};
 
 /// RPC gateway allowing for asynchronous request-response cycles over UDP.
 pub struct RpcGateway {
-    handle: thread::JoinHandle<()>,
-    shared_state: Arc<ThreadSharedState>,
+    state: Arc<Mutex<SharedState>>,
 }
 
-// TODO Investigate the use of lifetimes to limit memory use - e.g. don't
-//      return a Message -> return a slice over some memory owned by a
-//      UdpGateway - or by the shared state.
+struct SharedState {
+    loop_handle: task::JoinHandle<Result<()>>,
+    send_sender: Option<Sender<SendArgs>>,
+    recv_sender: Option<Sender<RecvArgs>>,
+    shutdown_sender: Option<Sender<()>>,
+}
+
+impl SharedState {
+    fn new(
+        loop_handle: task::JoinHandle<Result<()>>,
+        send_sender: Sender<SendArgs>,
+        recv_sender: Sender<RecvArgs>,
+        shutdown_sender: Sender<()>,
+    ) -> Self {
+        Self {
+            loop_handle,
+            send_sender: Some(send_sender),
+            recv_sender: Some(recv_sender),
+            shutdown_sender: Some(shutdown_sender),
+        }
+    }
+}
+
+type SendArgs = (Message, SocketAddr, OneshotSender<Result<(usize, Message)>>);
+type RecvArgs = OneshotSender<Result<(Message, Responder, SocketAddr)>>;
 
 impl RpcGateway {
     /// Creates a [`UdpSocket`] from the given address and starts listening
@@ -98,35 +116,28 @@ impl RpcGateway {
     ///
     /// The address type can be any implementor of the [`ToSocketAddrs`] trait.
     /// See its documentation and [`UdpSocket::bind`] for more info.
-    pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<Self> {
-        let udp = UdpSocket::bind(addr)?;
-        // TODO Investigate consequences of second-long timeout
-        udp.set_read_timeout(Some(Duration::from_secs(1)))?;
+    pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<RpcGateway> {
+        let socket = Arc::new(UdpSocket::bind(addr).await?);
 
-        let (sender, recv) = mpsc::channel();
+        let (send_sender, send_receiver) = mpsc::unbounded();
+        let (recv_sender, recv_receiver) = mpsc::unbounded();
+        let (shutdown_sender, shutdown_receiver) = mpsc::unbounded();
 
-        let shared_state = Arc::new(ThreadSharedState::new(udp, recv));
-        let shared_state_clone = shared_state.clone();
+        let loop_handle = task::spawn(gateway_loop(
+            socket,
+            send_receiver,
+            recv_receiver,
+            shutdown_receiver,
+        ));
 
-        let handle = thread::spawn(move || {
-            let shared_state = shared_state_clone;
-            let sender = sender;
-            loop_until_shutdown(shared_state, sender);
-        });
-
-        Ok(Self {
-            handle,
-            shared_state,
+        Ok(RpcGateway {
+            state: Arc::new(Mutex::new(SharedState::new(
+                loop_handle,
+                send_sender,
+                recv_sender,
+                shutdown_sender,
+            ))),
         })
-    }
-
-    /// Sets the timeout for a response to a request.
-    ///
-    /// A response timeout isn't exact, and one should consider a maximum of
-    /// approximately twice the inserted value. As an example, if the timeout
-    /// is set to be 5 secs, then a response will timeout before 10 secs.
-    pub fn set_response_timeout(&self, timeout: Duration) {
-        *self.shared_state.response_timeout.write().unwrap() = timeout;
     }
 
     /// Returns a future that on which to `await` yielding a request message,
@@ -135,256 +146,351 @@ impl RpcGateway {
     /// These futures are processed in sequence - the first call will be the
     /// first to resolve. See [`Responder`] documentation for details on how to
     /// respond to the request.
-    pub fn recv(&self) -> impl Future<Output = Result<(Message, Responder, SocketAddr)>> {
-        match &*self.shared_state.error.read().unwrap() {
-            Some(err) => {
-                return RequestFuture::erroring(err.clone());
-            }
-            None => {}
-        };
-
-        // If there is already a queued message handle it immediately
-        if let Ok((msg, resp, addr)) = self.shared_state.receiver.lock().unwrap().try_recv() {
-            return RequestFuture::already_concluded(msg, resp, addr);
+    pub async fn recv(&self) -> Result<(Message, Responder, SocketAddr)> {
+        let (sender, receiver) = oneshot::channel();
+        match &mut self.state.lock().await.recv_sender {
+            Some(recv_sender) => recv_sender.send(sender).await?,
+            None => return Err(Error::Shutdown),
         }
 
-        // Otherwise push it to the queue
-        let rss = RequestSharedState::new();
-        self.shared_state
-            .awaiting_requests
-            .lock()
-            .unwrap()
-            .push(rss.clone());
-
-        RequestFuture::new(rss)
+        receiver.await?
     }
 
     /// Sends a request to the given address. Returns a future yielding the
     /// number of bytes written on the socket and a response.
-    pub fn send<A: ToSocketAddrs>(
-        &self,
-        buf: &[u8],
-        addr: A,
-    ) -> impl Future<Output = Result<(usize, Message)>> {
-        match &*self.shared_state.error.read().unwrap() {
-            Some(err) => {
-                return ResponseFuture::erroring(err.clone());
-            }
-            None => {}
-        };
-
-        // Get socket address from addr
-        let mut addrs = match addr.to_socket_addrs() {
-            Ok(addrs) => addrs,
-            Err(err) => return ResponseFuture::erroring(err.into()),
-        };
+    pub async fn send<A: ToSocketAddrs>(&self, buf: &[u8], addr: A) -> Result<(usize, Message)> {
+        // get socket address from addr
+        let mut addrs = addr.to_socket_addrs().await?;
         let addr = addrs.next();
+
         if addr.is_none() {
             let err = io::Error::from(io::ErrorKind::InvalidInput);
-            return ResponseFuture::erroring(err.into());
+            return Err(err.into());
         }
+
         let addr = addr.unwrap();
+        let msg = Message::req(0, buf);
 
-        let mut awaiting_responses = self.shared_state.awaiting_responses.lock().unwrap();
-        let mut cycle_id = self.shared_state.cycle_id.lock().unwrap();
-
-        // make sure the same cycle_id is not already in use
-        while awaiting_responses.contains(&(addr, *cycle_id)) {
-            cycle_id.increment();
+        let (sender, receiver) = oneshot::channel();
+        match &mut self.state.lock().await.send_sender {
+            Some(send_sender) => send_sender.send((msg, addr, sender)).await?,
+            None => return Err(Error::Shutdown),
         }
 
-        // new buffer for the request.
-        // TODO Combat DoS attacks. Memory grows a lot. Rate limiting? How about DDoS?
-        let msg = Message::req(*cycle_id, buf);
-
-        let written = match self.shared_state.socket.send_to(&msg.vec[0..msg.len], addr) {
-            Ok(written) => written,
-            Err(err) => return ResponseFuture::erroring(err.into()),
-        };
-        let rss = ResponseSharedState::new(written - 3);
-
-        awaiting_responses.insert((addr, *cycle_id), rss.clone());
-        ResponseFuture::new(rss)
+        receiver.await?
     }
+
+    // TODO Reintroduce timeouts on requests, or should the user just drop?
+    //      How about sweeping kept memory?
 
     /// Shuts down the gateway and consumes it.
     ///
     /// Pending futures will fail with `Error::Shutdown` and passes an error if
     /// the inner thread paniced.
-    ///
-    /// See [`thread::JoinHandle::join()`].
-    pub fn shutdown(self) -> std::result::Result<(), Box<dyn Any + Send + 'static>> {
-        *self.shared_state.shutdown.write().unwrap() = true;
-        let res = self.handle.join();
+    pub async fn shutdown(&self) -> Result<()> {
+        let mut state = self.state.lock().await;
 
-        let mut awaiting_responses = self.shared_state.awaiting_responses.lock().unwrap();
-        let mut awaiting_requests = self.shared_state.awaiting_requests.lock().unwrap();
-
-        // end all pending response futures with Error::Shutdown
-        for ((_, _), shared_state) in awaiting_responses.drain() {
-            let mut state = shared_state.lock().unwrap();
-            state.result = Some(Err(Error::Shutdown));
-
-            if let Some(waker) = state.waker.take() {
-                waker.wake()
-            }
+        if let Some(shutdown_sender) = state.shutdown_sender.take() {
+            drop(shutdown_sender);
+        }
+        if let Some(send_sender) = state.send_sender.take() {
+            drop(send_sender);
+        }
+        if let Some(recv_sender) = state.recv_sender.take() {
+            drop(recv_sender);
         }
 
-        // end all pending request futures with Error::Shutdown
-        for shared_state in awaiting_requests.drain() {
-            let mut state = shared_state.lock().unwrap();
-            state.result = Some(Err(Error::Shutdown));
-
-            if let Some(waker) = state.waker.take() {
-                waker.wake()
-            }
-        }
-
-        res
+        (&mut state.loop_handle).await
     }
 }
 
-#[derive(Debug)]
-struct ThreadSharedState {
-    // Make these all Arc?
-    shutdown: RwLock<bool>,
-    error: RwLock<Option<Error>>,
-    awaiting_responses: Mutex<AwaitingResponseMap>,
-    cycle_id: Mutex<CycleId>,
-    socket: UdpSocket,
-    awaiting_requests: Mutex<AwaitingRequestQueue>,
-    receiver: Mutex<Receiver<(Message, Responder, SocketAddr)>>,
-    response_timeout: RwLock<Duration>,
-}
+async fn gateway_loop(
+    socket: Arc<UdpSocket>,
+    send_call_receiver: Receiver<SendArgs>,
+    recv_call_receiver: Receiver<RecvArgs>,
+    shutdown: Receiver<()>,
+) -> Result<()> {
+    let (send_sender, send_receiver) = mpsc::unbounded();
+    let (recv_sender, recv_receiver) = mpsc::unbounded();
+    let (mut broker_sender, broker_receiver) = mpsc::unbounded();
 
-impl ThreadSharedState {
-    fn new(socket: UdpSocket, recv: Receiver<(Message, Responder, SocketAddr)>) -> Self {
-        Self {
-            shutdown: RwLock::new(false),
-            error: RwLock::new(None),
-            socket,
-            receiver: Mutex::new(recv),
-            cycle_id: Mutex::new(CycleId::new()),
-            awaiting_responses: Mutex::new(AwaitingResponseMap::new()),
-            awaiting_requests: Mutex::new(AwaitingRequestQueue::new()),
-            response_timeout: RwLock::new(Duration::from_secs(30)),
-        }
-    }
-}
+    let send_handle = task::spawn(send_loop(socket.clone(), send_call_receiver, send_receiver));
+    let recv_handle = task::spawn(recv_loop(recv_call_receiver, recv_receiver));
+    let broker_handle = task::spawn(message_broker_loop(
+        socket.clone(),
+        broker_receiver,
+        send_sender,
+        recv_sender,
+    ));
 
-/// Processes datagrams until the shutdown flag is set to true.
-fn loop_until_shutdown(
-    state: Arc<ThreadSharedState>,
-    sender: Sender<(Message, Responder, SocketAddr)>,
-) {
-    let mut past = Instant::now();
+    let mut response = Ok(());
 
+    // select loop through shutdown and socket
+    let mut shutdown = shutdown.fuse();
     loop {
-        if *state.shutdown.read().unwrap() {
-            *state.error.write().unwrap() = Some(Error::Shutdown);
-            break;
-        }
+        let mut msg = Message::zeroed();
 
-        // Every `response_timeout` see if some responses are taking more
-        // than `response_timeout` secs, and eject them from the map, setting Error::Timeout.
-        let response_timeout = *state.response_timeout.read().unwrap();
-        if past.elapsed() > response_timeout {
-            let mut rss_vec = Vec::new();
-            let mut awaiting_responses = state.awaiting_responses.lock().unwrap();
-
-            for (key, rss) in awaiting_responses.iter() {
-                let rss_guard = rss.lock().unwrap();
-                if rss_guard.created.elapsed() > response_timeout {
-                    rss_vec.push((*key, rss.clone()))
-                }
-            }
-
-            for (key, rss) in rss_vec {
-                awaiting_responses.pop(&key);
-
-                let mut rss = rss.lock().unwrap();
-                rss.result = Some(Err(Error::Timeout));
-                if let Some(waker) = rss.waker.take() {
-                    waker.wake();
-                }
-            }
-
-            past = Instant::now();
-        }
-
-        let mut msg = Message::empty();
-        match state.socket.recv_from(&mut msg.vec[..]) {
-            Ok((len, addr)) => {
-                // Process the message elsewhere
-                msg.len = len;
-                process_buffer(state.clone(), sender.clone(), msg, addr);
-            }
-            Err(err) => {
-                // Timeouts are a good thing, since they allow stopping
-                // without first receiving a datagram.
-                let err_kind = err.kind();
-                match err_kind {
+        select! {
+            res = socket.recv_from(&mut msg.vec).fuse() => match res {
+                Ok((len, addr)) => {
+                    msg.len = len;
+                    broker_sender.send((msg, addr)).await.unwrap();
+                },
+                Err(err) => match err.kind() {
                     io::ErrorKind::WouldBlock => {}
                     io::ErrorKind::TimedOut => {}
                     _ => {
-                        *state.error.write().unwrap() = Some(err.into());
+                        response = Err(err.into());
                         break;
                     }
-                }
+                },
+            },
+            void = shutdown.next().fuse() => match void {
+                Some(_) => {},
+                None => break,
             }
+        }
+    }
+
+    drop(broker_sender);
+
+    broker_handle.await?;
+    send_handle.await?;
+    recv_handle.await?;
+
+    response
+}
+
+async fn message_broker_loop(
+    socket: Arc<UdpSocket>,
+    broker_receiver: Receiver<(Message, SocketAddr)>,
+    mut send_sender: Sender<(Message, SocketAddr)>,
+    mut recv_sender: Sender<(Message, Responder, SocketAddr)>,
+) -> Result<()> {
+    let mut broker_receiver = broker_receiver.fuse();
+    loop {
+        select! {
+            received = broker_receiver.next().fuse() => match received {
+                Some(received) => {
+                    // drop malformed packet
+                    if received.0.len < 4 {
+                        continue;
+                    }
+
+                    // send to the appropriate receiver
+                    match received.0.msb() {
+                        true => {
+                            send_sender.send(received).await.unwrap()
+                        },
+                        false => {
+                            let cycle_id = received.0.cycle_id();
+                            let resp = Responder::new(socket.clone(), received.1, cycle_id);
+                            let received = (received.0, resp, received.1);
+                            recv_sender.send(received).await.unwrap()
+                        },
+                    }
+                },
+                None => break,
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn recv_loop(
+    call_receiver: Receiver<RecvArgs>,
+    recv_receiver: Receiver<(Message, Responder, SocketAddr)>,
+) -> Result<()> {
+    let mut call_receiver = call_receiver.fuse();
+    let mut recv_receiver = recv_receiver.fuse();
+
+    let mut pending_messages = Vec::new();
+    let mut pending_receivers = Vec::new();
+
+    loop {
+        select! {
+            call = call_receiver.next().fuse() => match call {
+                Some(call) => {
+                    if !pending_messages.is_empty() {
+                        call.send(Ok(pending_messages.remove(0))).ok();
+                        continue;
+                    }
+                    pending_receivers.push(call);
+                },
+                None => break,
+            },
+            recv = recv_receiver.next().fuse() => match recv {
+                Some(recv) => {
+                    if !pending_receivers.is_empty() {
+                        pending_receivers.remove(0).send(Ok(recv)).ok();
+                        continue;
+                    }
+                    pending_messages.push(recv);
+                },
+                None => break,
+            },
+        }
+    }
+
+    for receiver in pending_receivers.drain(..) {
+        receiver.send(Err(Error::Shutdown)).ok();
+    }
+
+    Ok(())
+}
+
+async fn send_loop(
+    socket: Arc<UdpSocket>,
+    call_receiver: Receiver<SendArgs>,
+    send_receiver: Receiver<(Message, SocketAddr)>,
+) -> Result<()> {
+    let mut call_receiver = call_receiver.fuse();
+    let mut send_receiver = send_receiver.fuse();
+
+    let mut sender_map = HashMap::new();
+    let mut cycle_id = 0u16;
+
+    loop {
+        select! {
+            call = call_receiver.next().fuse() => match call {
+                Some(call) => {
+                    let (mut msg, addr, sender) = call;
+
+                    if sender_map.contains_key(&(addr, cycle_id)) {
+                        cycle_id += 1;
+                    }
+                    msg.vec[0] = 0; // set as a message
+                    let cycle_id_bytes = u16::to_be_bytes(cycle_id);
+                    msg.vec[1] = cycle_id_bytes[0]; // set cycle id bytes
+                    msg.vec[2] = cycle_id_bytes[1];
+                    let written = match socket.send_to(&msg.vec[0..msg.len], addr).await {
+                        Ok(written) => written,
+                        Err(err) => {
+                            sender.send(Err(err.into())).ok();
+                            continue;
+                        }
+                    };
+                    sender_map.insert((addr, cycle_id), (written, sender));
+                },
+                None => break,
+            },
+            send = send_receiver.next().fuse() => match send {
+                Some(send) => {
+                    let (msg, addr) = send;
+                    let cycle_id = u16::from_be_bytes([msg.vec[1], msg.vec[2]]);
+                    if let Some((written, sender)) = sender_map.remove(&(addr, cycle_id)) {
+                        sender.send(Ok((written - 3, msg))).ok();
+                    }
+                },
+                None => break,
+            },
+        }
+    }
+
+    for (_, (_, sender)) in sender_map.drain() {
+        sender.send(Err(Error::Shutdown)).ok();
+    }
+
+    Ok(())
+}
+
+type Result<T> = std::result::Result<T, Error>;
+
+type Sender<T> = mpsc::UnboundedSender<T>;
+type Receiver<T> = mpsc::UnboundedReceiver<T>;
+
+type OneshotSender<T> = oneshot::Sender<T>;
+
+/// Allows responding to incoming requests.
+pub struct Responder {
+    socket: Arc<UdpSocket>,
+    addr: SocketAddr,
+    cycle_id: u16,
+}
+
+impl Responder {
+    fn new(socket: Arc<UdpSocket>, addr: SocketAddr, cycle_id: u16) -> Self {
+        Self {
+            socket,
+            addr,
+            cycle_id,
+        }
+    }
+
+    /// Responds to a received request returning the amount of written from the
+    /// buffer to the underlying socket.
+    pub async fn respond(self, buf: &[u8]) -> Result<usize> {
+        let msg = Message::res(self.cycle_id, buf);
+        match self.socket.send_to(&msg.vec[0..msg.len], self.addr).await {
+            Ok(written) => Ok(written - 3),
+            Err(err) => Err(err.into()),
         }
     }
 }
 
-/// Processes the incoming message.
-fn process_buffer(
-    state: Arc<ThreadSharedState>,
-    sender: Sender<(Message, Responder, SocketAddr)>,
-    msg: Message,
-    addr: SocketAddr,
-) {
-    // drop malformed datagram
-    if msg.len < 4 {
-        return;
+const MAX_DATAGRAM_LEN: usize = 65536;
+
+/// Network message to be processed by a [`RpcGateway`].
+///
+/// These messages have a maximum size of 65533 bytes due to protocol overhead.
+pub struct Message {
+    vec: Vec<u8>,
+    len: usize,
+}
+
+impl Message {
+    const MSB: u8 = 0x80;
+
+    /// True if the most significant bit is set.
+    fn msb(&self) -> bool {
+        self.vec[0] & Self::MSB != 0
     }
-    match msg.vec[0] {
-        0x00 => {
-            let mut awaiting_requests = state.awaiting_requests.lock().unwrap();
-            let resp = Responder::new(
-                addr,
-                CycleId::from_bytes([msg.vec[1], msg.vec[2]]),
-                state.clone(),
-            );
-            // if there is a waiting request just set and wake (if has been polled)
-            // else just pump it through to the sender.
-            if let Some(rss) = awaiting_requests.pop() {
-                let mut rss = rss.lock().unwrap();
-                rss.result = Some(Ok((msg, resp, addr)));
-                if let Some(waker) = rss.waker.take() {
-                    waker.wake();
-                }
-            } else {
-                let _ = sender.send((msg, resp, addr));
-            }
-        }
-        0x01 => {
-            let mut awaiting_responses = state.awaiting_responses.lock().unwrap();
-            let cycle_id = CycleId::from_bytes([msg.vec[1], msg.vec[2]]);
 
-            // If there is a pending request set the response and wake,
-            // otherwise drop message.
-            if let Some(rss) = awaiting_responses.pop(&(addr, cycle_id)) {
-                let mut rss = rss.lock().unwrap();
+    fn cycle_id(&self) -> u16 {
+        u16::from_be_bytes([self.vec[1], self.vec[2]])
+    }
 
-                rss.result = Some(Ok(msg));
-                if let Some(waker) = rss.waker.take() {
-                    waker.wake();
-                }
-            }
+    fn zeroed() -> Self {
+        Self {
+            vec: vec![0; MAX_DATAGRAM_LEN],
+            len: 0,
         }
-        _ => {
-            // drop malformed datagram
-        }
+    }
+
+    /// Returns a request with a cycle id and a buffer.
+    fn req(cycle_id: u16, buf: &[u8]) -> Self {
+        let mut msg = Self::zeroed();
+
+        msg.vec[0] = 0x00;
+        msg.vec[1..3].copy_from_slice(&u16::to_be_bytes(cycle_id));
+
+        let to_copy = cmp::min(MAX_DATAGRAM_LEN - 3, buf.len());
+        msg.vec[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
+        msg.len = to_copy + 3;
+
+        msg
+    }
+
+    /// Returns a response with a cycle id and a buffer.
+    fn res(cycle_id: u16, buf: &[u8]) -> Self {
+        let mut msg = Self::zeroed();
+
+        msg.vec[0] = 0x01;
+        msg.vec[1..3].copy_from_slice(&u16::to_be_bytes(cycle_id));
+
+        let to_copy = cmp::min(MAX_DATAGRAM_LEN - 3, buf.len());
+        msg.vec[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
+        msg.len = to_copy + 3;
+
+        msg
+    }
+}
+
+impl AsRef<[u8]> for Message {
+    /// Returns a slice through the contents of a message.
+    fn as_ref(&self) -> &[u8] {
+        &self.vec[3..self.len]
     }
 }
 
@@ -401,374 +507,21 @@ pub enum Error {
     Timeout,
 }
 
-impl PartialEq for Error {
-    /// Is true if they're both shutdown or timeout errors, or if the
-    /// [`io::Error`] has the same [`io::ErrorKind`].
-    fn eq(&self, rhs: &Self) -> bool {
-        match self {
-            Error::Io(err) => {
-                if let Error::Io(rhs_err) = rhs {
-                    return err.kind() == rhs_err.kind();
-                }
-                false
-            }
-            Error::Shutdown => {
-                if let Error::Shutdown = rhs {
-                    return true;
-                }
-                false
-            }
-            Error::Timeout => {
-                if let Error::Timeout = rhs {
-                    return true;
-                }
-                false
-            }
-        }
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-        match self {
-            Error::Io(err) => write!(f, "RpcGateway: {}", err),
-            Error::Shutdown => write!(f, "RpcGateway: Shutdown"),
-            Error::Timeout => write!(f, "RpcGateway: Timeout"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl Clone for Error {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Io(err) => Self::Io(io::Error::from(err.kind())),
-            Self::Shutdown => Self::Shutdown,
-            Self::Timeout => Self::Timeout,
-        }
-    }
-}
-
 impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
+    fn from(io_err: io::Error) -> Self {
+        Error::Io(io_err)
     }
 }
 
-/// DRY keeping
-type Result<T> = std::result::Result<T, Error>;
-
-/// Future yielding a message and a responder when
-struct RequestFuture {
-    shared_state: Arc<Mutex<RequestSharedState>>,
-}
-
-impl Future for RequestFuture {
-    type Output = Result<(Message, Responder, SocketAddr)>;
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.shared_state.lock().unwrap();
-
-        match state.result.take() {
-            Some(res) => Poll::Ready(res),
-            None => {
-                state.waker = Some(ctx.waker().clone());
-                Poll::Pending
-            }
-        }
+impl From<mpsc::SendError> for Error {
+    fn from(_mpsc_err: mpsc::SendError) -> Self {
+        Self::Shutdown
     }
 }
 
-impl RequestFuture {
-    fn new(rss: Arc<Mutex<RequestSharedState>>) -> Self {
-        Self { shared_state: rss }
-    }
-
-    fn already_concluded(msg: Message, resp: Responder, addr: SocketAddr) -> Self {
-        Self {
-            shared_state: RequestSharedState::already_concluded(msg, resp, addr),
-        }
-    }
-
-    fn erroring(err: Error) -> Self {
-        Self {
-            shared_state: RequestSharedState::erroring(err),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct RequestSharedState {
-    result: Option<Result<(Message, Responder, SocketAddr)>>,
-    waker: Option<Waker>,
-}
-
-impl RequestSharedState {
-    /// New empty shared state.
-    fn new() -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {
-            result: None,
-            waker: None,
-        }))
-    }
-
-    /// New shared state that will immediately resolve when polled
-    fn already_concluded(msg: Message, resp: Responder, addr: SocketAddr) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {
-            result: Some(Ok((msg, resp, addr))),
-            waker: None,
-        }))
-    }
-
-    /// New erroring shared state
-    fn erroring(err: Error) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {
-            result: Some(Err(err)),
-            waker: None,
-        }))
-    }
-}
-
-/// Allows responding to incoming requests.
-#[derive(Debug)]
-pub struct Responder {
-    addr: SocketAddr,
-    cycle_id: CycleId,
-    shared_state: Arc<ThreadSharedState>,
-}
-
-impl Responder {
-    fn new(addr: SocketAddr, cycle_id: CycleId, shared_state: Arc<ThreadSharedState>) -> Self {
-        Self {
-            addr,
-            cycle_id,
-            shared_state,
-        }
-    }
-
-    /// Responds to a received request returning the amount of written from the
-    /// buffer to the underlying socket.
-    pub fn respond(self, buf: &[u8]) -> Result<usize> {
-        let state = self.shared_state.clone();
-
-        let msg = Message::res(self.cycle_id, buf);
-        match state.socket.send_to(&msg.vec[0..msg.len], self.addr) {
-            Ok(written) => Ok(written - 3),
-            Err(err) => Err(err.into()),
-        }
-    }
-}
-
-/// Future yielding with bytes written to the socket and a Message.
-struct ResponseFuture {
-    shared_state: Arc<Mutex<ResponseSharedState>>,
-}
-
-impl ResponseFuture {
-    fn new(rss: Arc<Mutex<ResponseSharedState>>) -> Self {
-        Self { shared_state: rss }
-    }
-
-    fn erroring(err: Error) -> Self {
-        Self {
-            shared_state: ResponseSharedState::erroring(err),
-        }
-    }
-}
-
-impl Future for ResponseFuture {
-    type Output = Result<(usize, Message)>;
-
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.shared_state.lock().unwrap();
-
-        match state.result.take() {
-            Some(res) => Poll::Ready(res.map(|msg| (state.bytes_consumed, msg))),
-            None => {
-                state.waker = Some(ctx.waker().clone());
-                Poll::Pending
-            }
-        }
-    }
-}
-
-/// The state shared between the running thread and a single request-response
-/// cycle.
-#[derive(Debug)]
-struct ResponseSharedState {
-    bytes_consumed: usize,
-    result: Option<Result<Message>>,
-    waker: Option<Waker>,
-    created: Instant,
-}
-
-impl ResponseSharedState {
-    /// New response state with `bytes_consumed` from the buffer.
-    fn new(bytes_consumed: usize) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {
-            bytes_consumed,
-            result: None,
-            waker: None,
-            created: Instant::now(),
-        }))
-    }
-
-    /// An erroring state. The future will return an error on poll().
-    fn erroring(err: Error) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {
-            bytes_consumed: 0,
-            result: Some(Err(err)),
-            waker: None,
-            created: Instant::now(),
-        }))
-    }
-}
-
-const MAX_DATAGRAM_LEN: usize = 65536;
-
-/// Network message to be processed by a [`RpcGateway`].
-///
-/// These messages have a maximum size of 65533 bytes due to protocol overhead.
-#[derive(Debug)]
-pub struct Message {
-    vec: Vec<u8>,
-    len: usize,
-}
-
-impl Message {
-    fn empty() -> Self {
-        Self {
-            vec: vec![0; MAX_DATAGRAM_LEN],
-            len: 0,
-        }
-    }
-
-    /// Returns a request with a cycle id and a buffer.
-    fn req(cycle_id: CycleId, buf: &[u8]) -> Self {
-        let mut this = Self::empty();
-
-        this.vec[0] = 0x00;
-        this.vec[1..3].copy_from_slice(&cycle_id.into_bytes());
-
-        let to_copy = cmp::min(MAX_DATAGRAM_LEN - 3, buf.len());
-        this.vec[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
-        this.len = to_copy + 3;
-
-        this
-    }
-
-    /// Returns a response with a cycle id and a buffer.
-    fn res(cycle_id: CycleId, buf: &[u8]) -> Self {
-        let mut this = Self::empty();
-
-        this.vec[0] = 0x01;
-        this.vec[1..3].copy_from_slice(&cycle_id.into_bytes());
-
-        let to_copy = cmp::min(MAX_DATAGRAM_LEN - 3, buf.len());
-        this.vec[3..to_copy + 3].copy_from_slice(&buf[0..to_copy]);
-        this.len = to_copy + 3;
-
-        this
-    }
-}
-
-impl AsRef<[u8]> for Message {
-    /// Returns a slice through the contents of a message.
-    fn as_ref(&self) -> &[u8] {
-        &self.vec[3..self.len]
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct CycleId(u16);
-
-impl CycleId {
-    fn new() -> Self {
-        Self(0)
-    }
-
-    fn increment(&mut self) {
-        self.0 += self.0.wrapping_add(1);
-    }
-
-    fn from_bytes(bytes: [u8; 2]) -> Self {
-        Self(u16::from_be_bytes(bytes))
-    }
-
-    fn into_bytes(self) -> [u8; 2] {
-        u16::to_be_bytes(self.0)
-    }
-}
-
-/// Maps incoming SocketAddr and cycle Ids to some shared state with the
-/// ResponseFuture.
-///
-/// This allows us to map pending request-response cycles to a way to notify
-/// the executor that a response is ready for consumption.
-#[derive(Debug)]
-struct AwaitingResponseMap(HashMap<(SocketAddr, CycleId), Arc<Mutex<ResponseSharedState>>>);
-
-impl AwaitingResponseMap {
-    /// Returns a new empty map.
-    fn new() -> Self {
-        Self(HashMap::new())
-    }
-
-    /// Inserts the state into the map using the (addr, cycle_id) tuple as a
-    /// key. Should never be called when there is already an item in the same
-    /// key. Make sure to check with [`contains`].
-    fn insert(&mut self, key: (SocketAddr, CycleId), state: Arc<Mutex<ResponseSharedState>>) {
-        self.0.insert(key, state);
-    }
-
-    /// Returns true if the (addr, cycle_id) tuple is a key in the map.
-    fn contains(&self, key: &(SocketAddr, CycleId)) -> bool {
-        self.0.contains_key(key)
-    }
-
-    /// Pops a value from the map if it exists.
-    fn pop(&mut self, key: &(SocketAddr, CycleId)) -> Option<Arc<Mutex<ResponseSharedState>>> {
-        self.0.remove(key)
-    }
-
-    /// Iterates through all values of the map
-    fn iter(
-        &self,
-    ) -> impl Iterator<Item = (&(SocketAddr, CycleId), &Arc<Mutex<ResponseSharedState>>)> + '_ {
-        self.0.iter()
-    }
-
-    /// Empties the map and returns all the values as an iterator.
-    fn drain(
-        &mut self,
-    ) -> impl Iterator<Item = ((SocketAddr, CycleId), Arc<Mutex<ResponseSharedState>>)> + '_ {
-        self.0.drain()
-    }
-}
-
-/// FIFO queue allowing us to enqueue waiting request futures.
-#[derive(Debug)]
-struct AwaitingRequestQueue(Vec<Arc<Mutex<RequestSharedState>>>);
-
-impl AwaitingRequestQueue {
-    /// New empty queue
-    fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    /// Pushes an element to the beginning of the queue.
-    fn push(&mut self, elem: Arc<Mutex<RequestSharedState>>) {
-        self.0.insert(0, elem)
-    }
-
-    /// Pops an element from the end of the queue.
-    fn pop(&mut self) -> Option<Arc<Mutex<RequestSharedState>>> {
-        self.0.pop()
-    }
-
-    /// Empties the queue returning an iterator over the element
-    fn drain(&mut self) -> impl Iterator<Item = Arc<Mutex<RequestSharedState>>> + '_ {
-        self.0.drain(..).rev()
+impl From<oneshot::Canceled> for Error {
+    fn from(_cancelled: oneshot::Canceled) -> Self {
+        Self::Shutdown
     }
 }
 
@@ -776,53 +529,64 @@ impl AwaitingRequestQueue {
 fn clean_shutdown() {
     use futures::executor::block_on;
 
-    let gateway = RpcGateway::bind("127.0.0.1:12345").expect("couldn't bind to address");
+    let gateway = block_on(RpcGateway::bind("127.0.0.1:33333")).expect("couldn't bind to address");
 
-    let res_fut = gateway.send(b"hello", "127.0.0.2:12345");
+    let res_fut = gateway.send(b"hello", "127.0.0.2:33333");
     let req_fut = gateway.recv();
 
-    gateway.shutdown().expect("not a clean shutdown");
+    block_on(gateway.shutdown()).expect("not a clean shutdown");
 
-    let res_err = block_on(res_fut).expect_err("not an error");
-    let req_err = block_on(req_fut).expect_err("not an error");
-
-    assert_eq!(res_err, Error::Shutdown);
-    assert_eq!(req_err, Error::Shutdown);
+    match block_on(res_fut) {
+        Ok(_) => panic!("not an error"),
+        Err(res_err) => match res_err {
+            Error::Shutdown => {}
+            _ => panic!("not Error::Shutdown"),
+        },
+    }
+    match block_on(req_fut) {
+        Ok(_) => panic!("not an error"),
+        Err(req_err) => match req_err {
+            Error::Shutdown => {}
+            _ => panic!("not Error::Shutdown"),
+        },
+    }
 }
 
 #[test]
-fn response_timeout() {
+fn multiple_receptions() {
     use futures::executor::block_on;
+    use std::net::UdpSocket;
 
-    let gateway = RpcGateway::bind("127.0.0.1:12346").expect("couldn't bind to address");
-    gateway.set_response_timeout(Duration::from_secs(1));
+    let hello = [
+        0,
+        0,
+        0,
+        0b0110_1000,
+        0b0110_0101,
+        0b0110_1100,
+        0b0110_1100,
+        0b0110_1111,
+    ];
 
-    // send back to ourselves
-    let res_fut = gateway.send(b"lost to the ether", "127.0.0.1:12346");
-    let err = block_on(res_fut).expect_err("not an error");
+    let dest_addr: SocketAddr = "127.0.0.2:22223".parse().unwrap();
+    let gateway = block_on(RpcGateway::bind(dest_addr)).expect("couldn't bind to address");
 
-    assert_eq!(err, Error::Timeout);
-    gateway.shutdown().unwrap();
-}
+    let origin_addr: SocketAddr = "127.0.0.1:11112".parse().unwrap();
+    let udp_socket = UdpSocket::bind(origin_addr).expect("couldn't bind to address");
 
-#[test]
-fn multiple_echoes() {
-    use futures::executor::block_on;
+    udp_socket
+        .send_to(&hello[..], dest_addr)
+        .expect("couldn't send message");
+    udp_socket
+        .send_to(&hello[..], dest_addr)
+        .expect("couldn't send message");
+    udp_socket
+        .send_to(&hello[..], dest_addr)
+        .expect("couldn't send message");
 
-    // startup two gateways
-    let origin_addr = "127.0.0.1:13562".parse().unwrap();
-    let gateway_origin = RpcGateway::bind(origin_addr).expect("couldn't bind to address");
-
-    let dest_addr: SocketAddr = "127.0.0.2:26531".parse().unwrap();
-    let gateway_dest = RpcGateway::bind(dest_addr).expect("couldn't bind to address");
-
-    let res1_fut = gateway_origin.send(b"hello1", dest_addr);
-    let res2_fut = gateway_origin.send(b"hello2", dest_addr);
-    let res3_fut = gateway_origin.send(b"hello3", dest_addr);
-
-    let req1_fut = gateway_dest.recv();
-    let req2_fut = gateway_dest.recv();
-    let req3_fut = gateway_dest.recv();
+    let req1_fut = gateway.recv();
+    let req2_fut = gateway.recv();
+    let req3_fut = gateway.recv();
 
     let (msg1, resp1, addr1) = block_on(req1_fut).unwrap();
     let (msg2, resp2, addr2) = block_on(req2_fut).unwrap();
@@ -832,22 +596,118 @@ fn multiple_echoes() {
     assert_eq!(addr2, origin_addr);
     assert_eq!(addr3, origin_addr);
 
-    resp1.respond(msg1.as_ref()).expect("couldn't echo");
-    resp2.respond(msg2.as_ref()).expect("couldn't echo");
-    resp3.respond(msg3.as_ref()).expect("couldn't echo");
+    match block_on(resp1.respond(msg1.as_ref())) {
+        Ok(_) => {}
+        _ => panic!("couldn't echo"),
+    }
+    match block_on(resp2.respond(msg2.as_ref())) {
+        Ok(_) => {}
+        _ => panic!("couldn't echo"),
+    }
+    match block_on(resp3.respond(msg3.as_ref())) {
+        Ok(_) => {}
+        _ => panic!("couldn't echo"),
+    }
 
-    let (written1, msg1) = block_on(res1_fut).unwrap();
-    let (written2, msg2) = block_on(res2_fut).unwrap();
-    let (written3, msg3) = block_on(res3_fut).unwrap();
+    let mut buf1 = [0u8; 8];
+    let (bytes_read1, addr1) = udp_socket.recv_from(&mut buf1).expect("failed receiving");
+    let mut buf2 = [0u8; 8];
+    let (bytes_read2, addr2) = udp_socket.recv_from(&mut buf2).expect("failed receiving");
+    let mut buf3 = [0u8; 8];
+    let (bytes_read3, addr3) = udp_socket.recv_from(&mut buf3).expect("failed receiving");
 
-    assert_eq!(msg1.as_ref(), b"hello1");
-    assert_eq!(msg2.as_ref(), b"hello2");
-    assert_eq!(msg3.as_ref(), b"hello3");
+    assert_eq!(addr1, dest_addr);
+    assert_eq!(addr2, dest_addr);
+    assert_eq!(addr3, dest_addr);
 
-    assert_eq!(written1, b"hello1".len());
-    assert_eq!(written2, b"hello2".len());
-    assert_eq!(written3, b"hello3".len());
+    assert_eq!(msg1.as_ref(), b"hello");
+    assert_eq!(msg2.as_ref(), b"hello");
+    assert_eq!(msg3.as_ref(), b"hello");
 
-    gateway_origin.shutdown().expect("error on shutdown");
-    gateway_dest.shutdown().expect("error on shutdown");
+    assert_eq!(bytes_read1, hello.len());
+    assert_eq!(bytes_read2, hello.len());
+    assert_eq!(bytes_read3, hello.len());
+
+    block_on(gateway.shutdown()).expect("error on shutdown");
+}
+
+#[test]
+fn multiple_sends() {
+    use futures::executor::block_on;
+    use std::net::UdpSocket;
+    use std::thread;
+
+    let origin_addr: SocketAddr = "127.0.0.2:22224".parse().unwrap();
+    let gateway = block_on(RpcGateway::bind(origin_addr)).expect("couldn't bind to address");
+
+    let dest_addr: SocketAddr = "127.0.0.1:11113".parse().unwrap();
+    let udp_socket = Arc::new(UdpSocket::bind(dest_addr).expect("couldn't bind to address"));
+
+    let clone_udpsocket = udp_socket.clone();
+    let thread1 = thread::spawn(move || {
+        let mut buf = [0u8; 8];
+        let (bytes_read, addr) = clone_udpsocket
+            .recv_from(&mut buf)
+            .expect("failed receiving");
+
+        assert_eq!(bytes_read, buf.len());
+        assert_eq!(addr, origin_addr);
+
+        buf[0] = 0x80;
+        clone_udpsocket
+            .send_to(&buf, origin_addr)
+            .expect("failed sending response");
+    });
+
+    let clone_udpsocket = udp_socket.clone();
+    let thread2 = thread::spawn(move || {
+        let mut buf = [0u8; 8];
+        let (bytes_read, addr) = clone_udpsocket
+            .recv_from(&mut buf)
+            .expect("failed receiving");
+
+        assert_eq!(bytes_read, buf.len());
+        assert_eq!(addr, origin_addr);
+
+        buf[0] = 0x80;
+        clone_udpsocket
+            .send_to(&buf, origin_addr)
+            .expect("failed sending response");
+    });
+
+    let clone_udpsocket = udp_socket;
+    let thread3 = thread::spawn(move || {
+        let mut buf = [0u8; 8];
+        let (bytes_read, addr) = clone_udpsocket
+            .recv_from(&mut buf)
+            .expect("failed receiving");
+
+        assert_eq!(bytes_read, buf.len());
+        assert_eq!(addr, origin_addr);
+
+        buf[0] = 0x80;
+        clone_udpsocket
+            .send_to(&buf, origin_addr)
+            .expect("failed sending response");
+    });
+
+    let (bytes_written1, msg1) =
+        block_on(gateway.send(b"hello", dest_addr)).expect("failed send()");
+    let (bytes_written2, msg2) =
+        block_on(gateway.send(b"hello", dest_addr)).expect("failed send()");
+    let (bytes_written3, msg3) =
+        block_on(gateway.send(b"hello", dest_addr)).expect("failed send()");
+
+    assert_eq!(bytes_written1, b"hello".len());
+    assert_eq!(bytes_written2, b"hello".len());
+    assert_eq!(bytes_written3, b"hello".len());
+
+    assert_eq!(msg1.as_ref(), b"hello");
+    assert_eq!(msg2.as_ref(), b"hello");
+    assert_eq!(msg3.as_ref(), b"hello");
+
+    thread1.join().expect("thread panic");
+    thread2.join().expect("thread panic");
+    thread3.join().expect("thread panic");
+    block_on(gateway.shutdown()).expect("error on shutdown");
 }
