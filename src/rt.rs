@@ -136,25 +136,12 @@ where
     }
 }
 
-fn rt_keys_equal<N>(lhs: &Key<N>, rhs: &Key<N>) -> bool
-where
-    N: ArrayLength<u8>,
-{
-    for i in 0..N::USIZE {
-        if lhs[i] != rhs[i] {
-            return false;
-        }
-    }
-
-    true
-}
-
 fn rt_kbucket_contains<I, N>(bucket: &KBucket<I, N>, key: &Key<N>) -> Option<usize>
 where
     N: ArrayLength<u8>,
 {
     for (index, elem) in bucket.iter().enumerate() {
-        if rt_keys_equal(&elem.0, key) {
+        if &elem.0 == key {
             return Some(index);
         }
     }
